@@ -394,6 +394,8 @@ test_agy_wiring_contract() {
     "agy wiring contract omitted its plugin manifest"
   assert_contains "$paths" "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1/hooks.json" \
     "agy wiring contract omitted its hooks"
+  assert_contains "$paths" "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1/fm-stop.sh" \
+    "agy wiring contract omitted its lifecycle observer"
   dir=$(fm_control_harness_wiring_dirs agy /tmp/wt /tmp/state task-x1)
   [ "$dir" = "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1" ] \
     || fail "agy wiring contract did not own its plugin directory"

@@ -87,7 +87,19 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+case "${1:-}" in
+  kill-window)
+    if [ -n "${FM_FAKE_TMUX_SWAP_WT:-}" ] && [ -n "${FM_FAKE_TMUX_SWAP_TARGET:-}" ]; then
+      mv "$FM_FAKE_TMUX_SWAP_WT" "$FM_FAKE_TMUX_SWAP_WT-original"
+      ln -s "$FM_FAKE_TMUX_SWAP_TARGET" "$FM_FAKE_TMUX_SWAP_WT"
+    fi
+    [ -z "${FM_FAKE_TMUX_STATE:-}" ] || : > "$FM_FAKE_TMUX_STATE"
+    ;;
+  display-message)
+    [ -z "${FM_FAKE_TMUX_STATE:-}" ] || [ ! -e "$FM_FAKE_TMUX_STATE" ]
+    exit $?
+    ;;
+esac
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -545,6 +557,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_FAKE_TMUX_STATE="${FM_FAKE_TMUX_STATE:-$case_dir/tmux-state}" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -1376,6 +1389,35 @@ test_agy_teardown_rejects_replaced_worktree_before_mutation() {
   assert_present "$case_dir/state/task-x1.meta" \
     "agy-worktree-symlink: teardown removed task metadata after refusing"
   pass "agy teardown rejects a replaced worktree before mutation"
+}
+
+test_agy_teardown_revalidates_worktree_after_endpoint_quiescence() {
+  local case_dir hook branch rc
+  case_dir=$(make_case agy-worktree-quiesce-race)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  hook="$case_dir/project/.claude/settings.local.json"
+  mkdir -p "${hook%/*}"
+  printf 'foreign hook\n' > "$hook"
+
+  rc=0
+  FM_FAKE_TMUX_SWAP_WT="$case_dir/wt" \
+  FM_FAKE_TMUX_SWAP_TARGET="$case_dir/project" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-worktree-quiesce-race: forced teardown should refuse"
+  assert_grep "worktree identity changed" "$case_dir/stderr" \
+    "agy-worktree-quiesce-race: teardown did not revalidate after closing the endpoint"
+  assert_present "$case_dir/tmux-state" \
+    "agy-worktree-quiesce-race: regression did not close the endpoint before replacement"
+  [ "$(cat "$hook")" = "foreign hook" ] \
+    || fail "agy-worktree-quiesce-race: teardown removed a hook through the replacement path"
+  branch=$(git -C "$case_dir/project" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ "$branch" = main ] \
+    || fail "agy-worktree-quiesce-race: teardown detached the replacement checkout"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-worktree-quiesce-race: teardown removed task metadata after refusing"
+  pass "agy teardown binds worktree identity across endpoint quiescence"
 }
 
 test_herdr_teardown_clears_escalation_marker() {
@@ -2654,6 +2696,7 @@ test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_agy_teardown_rejects_replaced_worktree_before_mutation
+test_agy_teardown_revalidates_worktree_after_endpoint_quiescence
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

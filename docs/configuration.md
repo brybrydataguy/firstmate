@@ -273,7 +273,8 @@ Kimi continues to use the captain's normal Kimi home, including the existing con
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
-For agy crews, `fm-spawn.sh` writes an isolated per-task plugin under `.agents/plugins/` whose lifecycle hooks update semantic busy state without replacing an existing project `.agents/hooks.json`.
+For agy crews, `fm-spawn.sh` requires `jq` and `sqlite3` before endpoint creation and writes an isolated per-task plugin under `.agents/plugins/` without replacing an existing project `.agents/hooks.json`.
+The plugin opens turns through `PreInvocation`; its synchronous `Stop` observer reads the vendor conversation database in read-only mode and keeps a background turn busy until every running task row becomes terminal.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

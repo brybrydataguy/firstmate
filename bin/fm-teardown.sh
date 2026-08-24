@@ -2416,8 +2416,47 @@ preflight_firstmate_home_herdr_children() {  # <home>
   done
 }
 
+teardown_endpoint_exists_in_home() {  # <backend> <target> <label> <home>
+  local backend=$1 target=$2 label=$3 home=${4:-$FM_HOME}
+  if [ "$backend" = zellij ] && [ "$home" != "$FM_HOME" ]; then
+    ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_target_exists "$backend" "$target" "$label" )
+  else
+    fm_backend_target_exists "$backend" "$target" "$label"
+  fi
+}
+
+teardown_quiesce_endpoint() {  # <backend> <target> <tab-id> <label> <home> <task-id>
+  local backend=$1 target=$2 tab_id=$3 label=$4 home=${5:-$FM_HOME} task_id=$6 attempt=0
+  if [ "$backend" = herdr ]; then
+    fm_backend_herdr_parse_target "$target" || return 1
+    if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
+      echo "error: herdr session presentation lock is not held for $task_id; preserving its endpoint and worktree" >&2
+      return 1
+    fi
+    fm_backend_herdr_kill_serialized "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true
+    if ! fm_backend_herdr_endpoint_confirmed_gone "$target"; then
+      echo "error: herdr pane $target for $task_id is not confirmed gone; preserving its worktree and durable identity" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [ "$backend" = zellij ] && [ "$home" != "$FM_HOME" ]; then
+    ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$backend" "$target" "$tab_id" "$label" ) 2>/dev/null || true
+  else
+    fm_backend_kill "$backend" "$target" "$tab_id" "$label" 2>/dev/null || true
+  fi
+  while teardown_endpoint_exists_in_home "$backend" "$target" "$label" "$home"; do
+    if [ "$attempt" -ge 50 ]; then
+      echo "error: endpoint $target for $task_id is not confirmed gone; preserving its worktree and durable identity" >&2
+      return 1
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_harness child_harness_family child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_harness child_harness_family child_orca_worktree_id child_return_rc child_busy_gen child_worktree_identity
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2441,7 +2480,17 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
-    if [ -n "$child_t" ]; then
+    if [ "$child_harness_family" = agy ]; then
+      child_worktree_identity=$(fm_control_harness_worktree_identity agy "$child_wt") || return 1
+      [ -n "$child_t" ] || {
+        echo "error: agy child $child_id has no endpoint to quiesce; preserving its worktree and durable identity" >&2
+        return 1
+      }
+      teardown_quiesce_endpoint \
+        "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" \
+        "fm-$child_id" "$home" "$child_id" || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_worktree_identity" || return 1
+    elif [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
         if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
@@ -2651,22 +2700,6 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-# Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
-if [ "$KIND" != secondmate ]; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-fi
-
-# Fix 3 (see script header): sweep remote job workers abandoned by an already
-# pruned code root. Best effort - a sweep failure never blocks this teardown.
-"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
-
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is
@@ -2682,6 +2715,69 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
+
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+
+TEARDOWN_ENDPOINT_QUIESCED=0
+AGY_WORKTREE_IDENTITY=
+if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
+  AGY_WORKTREE_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
+  if [ "$BACKEND" = herdr ] && [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
+    fi
+    if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+      echo "error: herdr pane $T for $ID is not confirmed gone; preserving its worktree and durable identity" >&2
+      exit 1
+    fi
+  else
+    teardown_quiesce_endpoint \
+      "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" \
+      "fm-$ID" "$FM_HOME" "$ID" || exit 1
+  fi
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
+  TEARDOWN_ENDPOINT_QUIESCED=1
+fi
+
+# Every landed/discard-work refusal above has now passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before ANY destructive step below - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ]; then
+  conclude_task_no_mistakes_run "$WT"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+fi
+
+if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
+fi
+
+# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# pruned code root. Best effort - a sweep failure never blocks this teardown.
+"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -2703,7 +2799,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       || fm_control_harness_wiring_cleanup agy "$WT" "$STATE" "$ID" \
       || exit 1
   fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  [ "$TEARDOWN_ENDPOINT_QUIESCED" = 1 ] || [ -z "$T_ORCA" ] \
+    || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -2732,28 +2829,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   }
 fi
 
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
-fi
-
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+if [ "$TEARDOWN_ENDPOINT_QUIESCED" != 1 ] && [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
@@ -2770,13 +2846,13 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
-elif [ "$BACKEND" = herdr ]; then
+elif [ "$TEARDOWN_ENDPOINT_QUIESCED" != 1 ] && [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
-elif [ "$BACKEND" != orca ]; then
+elif [ "$TEARDOWN_ENDPOINT_QUIESCED" != 1 ] && [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then

@@ -229,6 +229,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     agy)
       printf '%s\n' "$wt/.agents/plugins/fm-firstmate-busy-$id/plugin.json"
       printf '%s\n' "$wt/.agents/plugins/fm-firstmate-busy-$id/hooks.json"
+      printf '%s\n' "$wt/.agents/plugins/fm-firstmate-busy-$id/fm-stop.sh"
       ;;
   esac
 }
@@ -247,6 +248,33 @@ fm_control_harness_worktree_preflight() {  # <harness> <worktree>
   [ "$harness" = agy ] || return 0
   if [ -L "$wt" ] || { [ -e "$wt" ] && [ ! -d "$wt" ]; }; then
     echo "error: refusing agy operation through an unsafe worktree path: $wt" >&2
+    return 1
+  fi
+}
+
+fm_control_harness_worktree_identity() {  # <harness> <worktree>
+  local harness=${1-} wt=${2-}
+  harness=$(fm_control_harness_family "$harness") || return 1
+  [ "$harness" = agy ] || return 1
+  fm_control_harness_worktree_preflight "$harness" "$wt" || return 1
+  if [ ! -e "$wt" ]; then
+    printf 'missing\n'
+  elif [ "$(uname 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%d:%i' "$wt" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%d:%i' "$wt" 2>/dev/null
+  fi
+}
+
+fm_control_harness_worktree_identity_verify() {  # <harness> <worktree> <identity>
+  local harness=${1-} wt=${2-} expected=${3-} current
+  [ -n "$expected" ] || return 1
+  current=$(fm_control_harness_worktree_identity "$harness" "$wt") || {
+    echo "error: refusing agy operation because the worktree identity changed or became unsafe: $wt" >&2
+    return 1
+  }
+  if [ "$current" != "$expected" ]; then
+    echo "error: refusing agy operation because the worktree identity changed: $wt" >&2
     return 1
   fi
 }
