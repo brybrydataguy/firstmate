@@ -65,7 +65,8 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin engine (its only hook surface) is disabled in the default build, and its Claude-compatible hook dialect names `asyncRewake` and model reawakening as explicitly unsupported, which is exactly what a firstmate primary's turn-end supervision needs.
-`bin/fm-spawn.sh` refuses a `--secondmate` launch on muse for that reason.
+agy is also CREWMATE/SCOUT ONLY because no primary session-start, turn-end, or watcher supervision protocol has been verified for it.
+`bin/fm-spawn.sh` refuses a `--secondmate` launch on either adapter for that reason.
 cursor HAS a full hooks system: 20 lifecycle events configurable at project scope in `.cursor/hooks.json`, plus a Claude-Code compatibility name map that also loads `<project>/.claude/settings.json`.
 Its `stop` step cannot block - exit 2 there is a silent no-op - so `bin/fm-turnend-guard-cursor.sh` parks the turn boundary on the watcher and returns one bounded `followup_message` instead.
 Because Cursor loads the tracked Claude settings too, every Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload.
@@ -133,7 +134,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
-| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified 2026-08-24 on Antigravity CLI (`agy`) 1.1.19. Default model is `gemini-3.7-flash-high`. Model variants like `gemini-3.7-flash-high` already encode effort, so `--effort` is omitted by firstmate to avoid CLI conflict errors. `xhigh` and `max` are capped to `high`. |
+| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified 2026-08-24 on Antigravity CLI (`agy`) 1.1.19. Default model is `gemini-3.7-flash-high`; an explicit low or medium effort without a model selects the matching variant. Model variants already encode effort, so matching `--effort` is omitted and conflicting combinations are refused. `xhigh` and `max` are capped to `high`. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -538,25 +539,27 @@ muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and c
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
 
-## agy (VERIFIED 2026-08-24, Antigravity CLI 1.1.19)
+## agy (VERIFIED CREWMATE/SCOUT 2026-08-24, Antigravity CLI 1.1.19)
 
 Antigravity CLI launches from `PATH` (typically `/opt/homebrew/bin/agy`).
+It is not verified for secondmate or primary work.
 
 | Fact | Value |
 |---|---|
 | Binary | Executable `agy` from `PATH`; verified on version 1.1.19. |
 | Launch | `agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`; positional prompts are rejected with exit code 2. |
 | Models | `gemini-3.7-flash-high` (default), `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, Claude Sonnet/Opus models. Authoritative discovery: `agy models`. |
-| Busy-pane signature | `esc to cancel` on bottom left, Braille spinners `[⣾⣽⣻⢿⡿⣟⣯⣷]`, and step headers (`● Bash(...)`, `⣾ Loading...`). |
+| Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn and `Stop` to close it. |
+| Delivery busy token | `esc to cancel`, the live footer present only while a turn is running. |
 | Exit command | `/exit` or `/quit` or `Ctrl+D` (exits cleanly with status 0). |
 | Interrupt | Single Escape or `Ctrl+C` cancels active turn and returns to composer. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; skills in `.agents/skills/` are discovered. Typing `/` opens the interactive autocomplete menu, and typing the full skill name with Enter submits and activates the skill directly. |
 | Autonomy | `--dangerously-skip-permissions` auto-approves all tool permission requests without prompting once project trust is established. |
 | Trust dialog | Interactive launches (`-i`) in untrusted workspaces display a project trust dialog (`Do you trust the contents of this project?`) with `Yes, I trust this folder` as default. Firstmate peek handles this with `fm-send.sh <window> --key Enter`. Trust persists per canonical path in `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces`. |
-| Hooks | Natively supports `.agents/hooks.json` events including `Stop`, `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`. Project hooks are strictly gated on workspace trust. |
+| Hooks | Natively supports `.agents/hooks.json` and project plugin hooks including `Stop`, `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`. Project hooks are strictly gated on workspace trust. |
 | Environment markers | Child tool processes receive `ANTIGRAVITY_LS_VERSION=cli-1.1.19` and `ANTIGRAVITY_SOURCE_METADATA`. |
 | Composer | Horizontal rule borders (`───`) enclosing prompt glyph `>`. Bordered empty composer correctly classifies as `empty`. |
-| Effort | `--effort low\|medium\|high`. Firstmate omits `--effort` for variant models (e.g. `gemini-3.7-flash-high`) and caps `xhigh`/`max` to `high` for generic model names. |
+| Effort | `--effort low\|medium\|high`. Without an explicit model, low and medium select matching Flash variants while all other levels select the high default. Firstmate omits `--effort` for variant models, refuses a conflicting explicit combination, and caps `xhigh`/`max` to `high` for generic model names. |
 | Resumption | Resumes prior conversations via `agy --conversation <id>` or `--continue` / `-c`. |
 
 `agy` delivers the launch brief through `--prompt-interactive` (`-i`) as a single interactive turn.
@@ -565,4 +568,5 @@ Tool execution is fully autonomous once `--dangerously-skip-permissions` is pass
 On first interactive launch in an untrusted directory, `agy` renders a project trust confirmation prompt.
 Firstmate supervisors handle this dialog by sending `Enter` upon spawn peek.
 Accepted trust is saved to `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces` and persists across subsequent launches.
-Project-local `.agents/hooks.json` hooks (including `Stop` and `PreToolUse`) are gated on workspace trust and fire normally once trust is granted.
+Firstmate writes an isolated project plugin under `.agents/plugins/` so existing project hooks remain untouched.
+Its `PreInvocation` and `Stop` hooks are gated on workspace trust and fire normally once trust is granted.

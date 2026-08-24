@@ -5,6 +5,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 HARNESS_SH="$ROOT/bin/fm-harness.sh"
 BOOTSTRAP_SH="$ROOT/bin/fm-bootstrap.sh"
@@ -24,7 +27,11 @@ esac
 case "${1:-}" in
   display-message) printf "firstmate\n"; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|kill-window) exit 0 ;;
+  new-session|new-window)
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_ENDPOINT_LOG"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -62,14 +69,16 @@ make_spawn_case() {
 }
 
 run_agy_spawn() {
-  local home=$1 proj=$2 wt=$3 fakebin=$4 launchlog=$5 id=$6
+  local home=$1 proj=$2 wt=$3 fakebin=$4 launchlog=$5 id=$6 launch_path
   shift 6
   : > "$launchlog"
+  : > "$launchlog.endpoints"
+  launch_path=${FM_AGY_TEST_PATH:-$fakebin:$PATH}
   FM_ROOT_OVERRIDE="" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$launchlog.endpoints" PATH="$launch_path" \
     "$SPAWN" "$id" "$proj" agy --mode no-mistakes --yolo off "$@" 2>&1
 }
 
@@ -85,6 +94,7 @@ test_agy_harness_detection() {
   . "$ROOT/bin/fm-session-lock-lib.sh"
   printf "agy\n" | grep -qE "$FM_HARNESS_RE" || fail "FM_HARNESS_RE did not match agy"
   printf "foo-agy-bar\n" | grep -qE "$FM_HARNESS_RE" || fail "FM_HARNESS_RE did not match *agy*"
+  [ "$(fm_harness_path_name /opt/homebrew/bin/agy)" = agy ] || fail "session-lock exact path table did not identify agy"
   pass "fm-harness and session-lock: detects agy markers and process identity"
 }
 
@@ -98,8 +108,12 @@ EOF
   assert_contains "$out" "spawned $id harness=agy" "agy spawn did not report success: $out"
 
   launched=$(cat "$launchlog")
-  assert_contains "$launched" "agy --dangerously-skip-permissions --model 'gemini-3.7-flash-high' --prompt-interactive" \
+  assert_contains "$launched" "'$fakebin/agy' --dangerously-skip-permissions --model 'gemini-3.7-flash-high' --prompt-interactive" \
     "agy launch command did not match expected template with default model: $launched"
+  assert_contains "$launched" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
+    "agy launch did not clear inherited Cursor markers: $launched"
+  assert_contains "$launched" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
+    "agy launch did not clear inherited Claude, Pi, and Grok markers: $launched"
 
   meta_file="$home/state/$id.meta"
   assert_contains "$(cat "$meta_file")" "model=gemini-3.7-flash-high" "meta file did not record default model: $(cat "$meta_file")"
@@ -117,7 +131,7 @@ EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --model gemini-3.7-flash-high --effort high)
   launched=$(cat "$launchlog")
   assert_contains "$launched" "--model 'gemini-3.7-flash-high'" "launch did not include model: $launched"
-  assert_no_grep "\-\effort" "$launchlog" "launch command emitted redundant/conflicting --effort for variant model ID"
+  assert_not_contains "$launched" "--effort" "launch command emitted redundant/conflicting --effort for variant model ID"
 
   # 2. Base model ID with effort: emits --effort <effort>
   rec=$(make_spawn_case base-effort)
@@ -144,7 +158,103 @@ EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --model gemini-3.7-flash --effort max)
   launched=$(cat "$launchlog")
   assert_contains "$launched" "--model 'gemini-3.7-flash' --effort 'high'" "launch command did not cap max to high: $launched"
+
+  rec=$(make_spawn_case implicit-low)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --effort low)
+  launched=$(cat "$launchlog")
+  assert_contains "$launched" "--model 'gemini-3.7-flash-low'" "explicit low effort did not select the low model variant: $launched"
+  assert_contains "$(cat "$home/state/$id.meta")" "effort=low" "meta did not retain explicit low effort"
+
+  rec=$(make_spawn_case implicit-medium)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --effort medium)
+  launched=$(cat "$launchlog")
+  assert_contains "$launched" "--model 'gemini-3.7-flash-medium'" "explicit medium effort did not select the medium model variant: $launched"
+
+  rec=$(make_spawn_case conflicting-effort)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --model gemini-3.7-flash-high --effort low)
+  expect_code 1 $? "a conflicting model variant and effort should be refused"
+  assert_contains "$out" "conflicts with requested effort 'low'" "profile conflict refusal was not actionable: $out"
+  [ ! -s "$launchlog.endpoints" ] || fail "profile conflict created an endpoint before refusing"
   pass "fm-spawn: agy handles variant model suppression and effort capping appropriately"
+}
+
+run_agy_hook() {
+  local hooks=$1 event=$2 cmd
+  cmd=$(jq -r ".[\"fm-firstmate-busy\"][\"$event\"][0].command" "$hooks")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "agy plugin lacks $event"
+  sh -c "$cmd"
+}
+
+test_agy_semantic_busy_lifecycle() {
+  local rec case_dir home proj wt fakebin launchlog id out hooks state
+  rec=$(make_spawn_case semantic-busy)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id")
+  expect_code 0 $? "agy spawn should install semantic lifecycle wiring: $out"
+  hooks="$wt/.agents/plugins/fm-firstmate-busy-$id/hooks.json"
+  state="$home/state"
+  assert_present "$hooks" "agy spawn did not write its isolated lifecycle plugin"
+  jq -e . "$hooks" >/dev/null || fail "agy lifecycle plugin is not valid JSON"
+  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy fm-spawn" ] \
+    || fail "agy launch turn was not seeded busy"
+  rm -f "$state/$id.turn-ended"
+  out=$(run_agy_hook "$hooks" Stop) || fail "agy Stop hook failed: $out"
+  printf '%s' "$out" | jq -e '.decision == "allow"' >/dev/null \
+    || fail "agy Stop hook did not return its required JSON contract: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "agy Stop hook did not touch the turn-end notification"
+  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "idle agy-hook" ] \
+    || fail "agy Stop hook did not settle semantic state"
+  out=$(run_agy_hook "$hooks" PreInvocation) || fail "agy PreInvocation hook failed: $out"
+  printf '%s' "$out" | jq -e 'type == "object"' >/dev/null \
+    || fail "agy PreInvocation hook did not return JSON: $out"
+  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy agy-hook" ] \
+    || fail "agy PreInvocation hook did not open semantic state"
+  pass "fm-spawn and fm-busy-lib: agy lifecycle hooks drive semantic busy state"
+}
+
+test_agy_missing_binary_refuses_before_endpoint_creation() {
+  local rec case_dir home proj wt fakebin launchlog id out
+  rec=$(make_spawn_case missing-binary)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  rm -f "$fakebin/agy"
+  out=$(FM_AGY_TEST_PATH="$fakebin:/usr/bin:/bin" \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id")
+  expect_code 1 $? "missing agy should refuse the spawn"
+  assert_contains "$out" "agy executable not found on PATH" "missing binary refusal did not name agy: $out"
+  [ ! -s "$launchlog.endpoints" ] || fail "missing agy created an endpoint before refusing"
+  assert_absent "$home/state/$id.meta" "missing agy published task metadata"
+  pass "fm-spawn: missing agy refuses before endpoint creation"
+}
+
+test_agy_refuses_secondmate() {
+  local case_dir home fakebin id out
+  case_dir="$TMP_ROOT/secondmate"
+  home="$case_dir/home"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  id=agy-secondmate-x1
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'charter\n' > "$home/data/$id/brief.md"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" agy --secondmate 2>&1)
+  expect_code 1 $? "agy should be refused for secondmate work"
+  assert_contains "$out" "crewmate/scout adapter only" "agy secondmate refusal did not explain the capability boundary: $out"
+  pass "fm-spawn: agy is restricted to crewmate and scout work"
 }
 
 test_agy_busy_matching_and_liveness() {
@@ -152,12 +262,14 @@ test_agy_busy_matching_and_liveness() {
   . "$TMUX_LIB"
 
   # Busy samples
-  printf "● Bash(ls -la)\n⣾  Loading...\nesc to cancel\n" | fm_busy_lines_match agy || fail "agy busy lines did not match"
-  printf "Thought for 4s\n⣽  Thinking...\nesc to cancel\n" | fm_busy_lines_match agy || fail "agy thinking lines did not match"
+  printf "● Bash(ls -la)\n⣾  Loading...\nesc to cancel\n" | fm_busy_lines_match agy || fail "agy busy footer did not match"
 
   # Idle samples
   if printf "? for shortcuts                                      Gemini 3.7 Flash · high\n" | fm_busy_lines_match agy; then
     fail "agy idle footer falsely matched as busy"
+  fi
+  if printf "Completed output mentions ⣾ Loading... as ordinary transcript text\n" | fm_busy_lines_match agy; then
+    fail "agy transcript text falsely matched as a live delivery-busy footer"
   fi
 
   # shellcheck source=bin/backends/tmux.sh
@@ -190,6 +302,10 @@ test_agy_crew_dispatch_validation() {
   out=$(FM_HOME="$home" "$BOOTSTRAP_SH" 2>&1)
   assert_not_contains "$out" "CREW_DISPATCH: invalid" "crew-dispatch was rejected"
 
+  printf "%s\n" '{"default":{"harness":"agy","model":"gemini-3.7-flash","effort":"xhigh"}}' > "$config/crew-dispatch.json"
+  out=$(FM_HOME="$home" "$BOOTSTRAP_SH" 2>&1)
+  assert_not_contains "$out" "CREW_DISPATCH: invalid" "crew-dispatch rejected an effort that agy caps to high"
+
   # Invalid effort for agy
   printf "%s\n" '{"default":{"harness":"agy","effort":"bad-effort"}}' > "$config/crew-dispatch.json"
   out=$(FM_HOME="$home" "$BOOTSTRAP_SH" 2>&1)
@@ -201,5 +317,8 @@ test_agy_crew_dispatch_validation() {
 test_agy_harness_detection
 test_agy_default_model_and_launch_template
 test_agy_effort_flag_handling
+test_agy_semantic_busy_lifecycle
+test_agy_missing_binary_refuses_before_endpoint_creation
+test_agy_refuses_secondmate
 test_agy_busy_matching_and_liveness
 test_agy_crew_dispatch_validation

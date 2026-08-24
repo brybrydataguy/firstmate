@@ -430,6 +430,22 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
+test_agy_harness_switch_removes_the_plugin_directory() {
+  local dir plugin out rc
+  dir=$(new_case agy-switch rl36)
+  add_ship_task "$dir" rl36 agy
+  printf 'agy' > "$dir/fake/command"
+  plugin="$dir/wt/.agents/plugins/fm-firstmate-busy-rl36"
+  mkdir -p "$plugin"
+  printf '%s\n' '{"name":"fm-firstmate-busy-rl36"}' > "$plugin/plugin.json"
+  printf '%s\n' '{"fm-firstmate-busy":{}}' > "$plugin/hooks.json"
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl36 relaunch --harness claude --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "switching away from agy should succeed"$'\n'"$out"
+  [ ! -e "$plugin" ] || fail "switching away from agy left its plugin directory behind"
+  pass "fm-control relaunch: agy plugin wiring retires with its agent"
+}
+
 test_harness_switch_does_not_carry_the_old_profile_axes() {
   local dir out rc
   dir=$(new_case profile rl5)
@@ -1319,6 +1335,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_agy_harness_switch_removes_the_plugin_directory
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

@@ -832,6 +832,12 @@ clear_relaunch_harness_wiring() {
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rmdir -- "$path" 2>/dev/null || [ ! -e "$path" ] || return 1
+  done <<EOF
+$(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id")
+EOF
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -1198,7 +1204,7 @@ launch_template() {
     # agy (Antigravity CLI): --prompt-interactive (-i) delivers the brief to start
     # the supervised interactive session. --dangerously-skip-permissions auto-approves
     # tool execution without per-tool confirmation prompts.
-    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1247,6 +1253,10 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = agy ]; then
+  echo "error: agy is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1304,9 +1314,21 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
 fi
 
 if [ "$HARNESS" = agy ]; then
-  if [ "$MODEL_SET" -eq 0 ] || [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
-    MODEL="gemini-3.7-flash-high"
+  if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    case "$EFFORT" in
+      low) MODEL=gemini-3.7-flash-low ;;
+      medium) MODEL=gemini-3.7-flash-medium ;;
+      *) MODEL=gemini-3.7-flash-high ;;
+    esac
   fi
+  case "$MODEL:$EFFORT" in
+    *-low:medium|*-low:high|*-low:xhigh|*-low:max|\
+    *-medium:low|*-medium:high|*-medium:xhigh|*-medium:max|\
+    *-high:low|*-high:medium)
+      echo "error: agy model '$MODEL' conflicts with requested effort '$EFFORT'; select the matching low, medium, or high model variant" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 secondmate_registry_value() {
@@ -1353,6 +1375,25 @@ resolve_muse_binary() {
     esac
   fi
   echo "error: muse executable not found on PATH; install Muse Code or select a different verified harness" >&2
+  return 1
+}
+
+resolve_agy_binary() {
+  local candidate dir
+  candidate=$(command -v agy 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
   return 1
 }
 
@@ -1500,6 +1541,13 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__AGYBIN__*)
+    AGY_BIN=$(resolve_agy_binary) || exit 1
+    LAUNCH=${LAUNCH//__AGYBIN__/$(shell_quote "$AGY_BIN")}
     ;;
 esac
 
@@ -2365,7 +2413,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|agy*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2491,6 +2539,22 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
+      ;;
+    agy*)
+      AGY_PLUGIN_DIR="$WT/.agents/plugins/fm-firstmate-busy-$ID"
+      mkdir -p "$AGY_PLUGIN_DIR"
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
+      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '%s\\n' '{}'")
+      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; printf '%s\\n' '{\"decision\":\"allow\"}'")
+      cat > "$AGY_PLUGIN_DIR/plugin.json" <<EOF
+{"name":"fm-firstmate-busy-$ID"}
+EOF
+      cat > "$AGY_PLUGIN_DIR/hooks.json" <<EOF
+{"fm-firstmate-busy":{"PreInvocation":[{"type":"command","command":"$j_submit"}],"Stop":[{"type":"command","command":"$j_stop"}]}}
+EOF
+      exclude_path ".agents/plugins/fm-firstmate-busy-$ID/plugin.json"
+      exclude_path ".agents/plugins/fm-firstmate-busy-$ID/hooks.json"
       ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
@@ -2774,9 +2838,13 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|muse|agy)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
+esac
+case "$HARNESS" in
+  agy) ;;
+  *) LAUNCH="env -u ANTIGRAVITY_LS_VERSION -u ANTIGRAVITY_SOURCE_METADATA $LAUNCH" ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls

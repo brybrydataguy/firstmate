@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse agy"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -52,6 +52,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    agy) printf '/exit\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -267,7 +268,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed; do
+      pi-signed:pi-signed agy:agy agy-cli:agy; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -375,13 +376,28 @@ test_harness_kind_capability() {
   done
   fm_control_harness_supports_kind muse secondmate \
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
-  for harness in claude codex opencode pi pi-signed grok kimi; do
+  fm_control_harness_supports_kind agy secondmate \
+    && fail "agy has no primary supervision protocol and must not claim a secondmate"
+  for harness in claude codex opencode pi pi-signed grok kimi cursor; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
   done
   fm_control_harness_supports_kind someagent ship \
     && fail "an unverified harness must not claim any kind"
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
+}
+
+test_agy_wiring_contract() {
+  local paths dir
+  paths=$(fm_control_harness_wiring_paths agy /tmp/wt /tmp/state task-x1)
+  assert_contains "$paths" "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1/plugin.json" \
+    "agy wiring contract omitted its plugin manifest"
+  assert_contains "$paths" "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1/hooks.json" \
+    "agy wiring contract omitted its hooks"
+  dir=$(fm_control_harness_wiring_dirs agy /tmp/wt /tmp/state task-x1)
+  [ "$dir" = "/tmp/wt/.agents/plugins/fm-firstmate-busy-task-x1" ] \
+    || fail "agy wiring contract did not own its plugin directory"
+  pass "fm-control-lib: agy lifecycle wiring has one cleanup owner"
 }
 
 test_orca_refuses_an_escape_harness_interrupt() {
@@ -881,6 +897,7 @@ test_harness_family_resolution
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
+test_agy_wiring_contract
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
