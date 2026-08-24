@@ -92,10 +92,13 @@ test_agy_harness_detection() {
 
   # shellcheck source=bin/fm-session-lock-lib.sh
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  printf "agy\n" | grep -qE "$FM_HARNESS_RE" || fail "FM_HARNESS_RE did not match agy"
-  printf "foo-agy-bar\n" | grep -qE "$FM_HARNESS_RE" || fail "FM_HARNESS_RE did not match *agy*"
-  [ "$(fm_harness_path_name /opt/homebrew/bin/agy)" = agy ] || fail "session-lock exact path table did not identify agy"
-  pass "fm-harness and session-lock: detects agy markers and process identity"
+  if fm_harness_process_matches agy agy; then
+    fail "worker-only agy was accepted as a primary session-lock owner"
+  fi
+  if fm_harness_path_name /opt/homebrew/bin/agy >/dev/null; then
+    fail "worker-only agy was present in the primary path-identity table"
+  fi
+  pass "fm-harness detects agy without granting primary session ownership"
 }
 
 test_agy_default_model_and_launch_template() {
@@ -287,6 +290,31 @@ EOF
   pass "fm-spawn: agy plugin installation refuses collisions and symlinks"
 }
 
+test_agy_post_allocation_failure_preserves_recovery_metadata() {
+  local rec case_dir home proj wt fakebin launchlog id out plugin meta
+  rec=$(make_spawn_case busy-arm-failure)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  mkdir "$home/state/$id.busy-state.lock"
+  out=$(FM_BUSY_LOCK_STALE_SECS=3600 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id")
+  expect_code 1 $? "agy spawn should fail when semantic busy-state arming fails"
+  assert_contains "$out" "failed to arm the busy-state contract" \
+    "agy busy-state failure was not actionable: $out"
+  [ -s "$launchlog.endpoints" ] || fail "agy busy-state failure did not exercise a post-allocation path"
+  meta="$home/state/$id.meta"
+  assert_present "$meta" "agy busy-state failure did not preserve recovery metadata"
+  assert_contains "$(cat "$meta")" "worktree=$wt" \
+    "agy busy-state recovery metadata omitted the allocated worktree"
+  assert_contains "$(cat "$meta")" "harness=unknown" \
+    "agy busy-state recovery metadata claimed an incompletely installed adapter"
+  plugin="$wt/.agents/plugins/fm-firstmate-busy-$id"
+  [ ! -e "$plugin" ] && [ ! -L "$plugin" ] \
+    || fail "agy busy-state failure left a partial plugin installation"
+  pass "fm-spawn: post-allocation agy failures preserve recovery metadata"
+}
+
 test_agy_missing_binary_refuses_before_endpoint_creation() {
   local rec case_dir home proj wt fakebin launchlog id out
   rec=$(make_spawn_case missing-binary)
@@ -384,6 +412,7 @@ test_agy_effort_flag_handling
 test_agy_semantic_busy_lifecycle
 test_agy_manifest_name_accepts_dotted_task_id
 test_agy_plugin_collisions_are_refused
+test_agy_post_allocation_failure_preserves_recovery_metadata
 test_agy_missing_binary_refuses_before_endpoint_creation
 test_agy_refuses_secondmate
 test_agy_busy_matching_and_liveness

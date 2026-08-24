@@ -246,6 +246,10 @@ fm_control_harness_wiring_cleanup() {  # <harness> <worktree> <state-dir> <id>
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   harness=$(fm_control_harness_family "$harness") || return 0
   if [ "$harness" = agy ]; then
+    if [ -L "$wt" ] || { [ -e "$wt" ] && [ ! -d "$wt" ]; }; then
+      echo "error: refusing agy wiring cleanup through an unsafe worktree path: $wt" >&2
+      return 1
+    fi
     dir=$(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id") || return 1
     for parent in "$wt/.agents" "$wt/.agents/plugins"; do
       if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then

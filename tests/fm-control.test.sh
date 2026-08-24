@@ -422,6 +422,28 @@ test_agy_wiring_cleanup_does_not_follow_symlinks() {
   pass "fm-control-lib: agy wiring cleanup unlinks symlinks without traversal"
 }
 
+test_agy_wiring_cleanup_rejects_symlinked_worktree() {
+  local dir wt target state plugin out rc
+  dir=$(new_case agy-worktree-symlink-cleanup)
+  wt="$dir/wt-link"
+  target="$dir/wt-target"
+  state="$dir/state"
+  plugin="$target/.agents/plugins/fm-firstmate-busy-task-x1"
+  mkdir -p "$plugin" "$state"
+  printf 'target manifest\n' > "$plugin/plugin.json"
+  printf 'target hooks\n' > "$plugin/hooks.json"
+  ln -s "$target" "$wt"
+  out=$(fm_control_harness_wiring_cleanup agy "$wt" "$state" task-x1 2>&1); rc=$?
+  expect_code 1 "$rc" "agy wiring cleanup should reject a symlinked worktree"
+  assert_contains "$out" "unsafe worktree path" \
+    "agy wiring cleanup did not explain the symlinked-worktree refusal"
+  [ "$(cat "$plugin/plugin.json")" = "target manifest" ] \
+    || fail "agy wiring cleanup followed the worktree symlink to the target manifest"
+  [ "$(cat "$plugin/hooks.json")" = "target hooks" ] \
+    || fail "agy wiring cleanup followed the worktree symlink to the target hooks"
+  pass "fm-control-lib: agy wiring cleanup rejects symlinked worktrees"
+}
+
 test_orca_refuses_an_escape_harness_interrupt() {
   local dir out rc
   dir=$(new_case orca-escape)
@@ -921,6 +943,7 @@ test_backend_key_capability_matrix
 test_harness_kind_capability
 test_agy_wiring_contract
 test_agy_wiring_cleanup_does_not_follow_symlinks
+test_agy_wiring_cleanup_rejects_symlinked_worktree
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr

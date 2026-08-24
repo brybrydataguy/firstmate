@@ -672,6 +672,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 AGY_PLUGIN_INSTALL_PENDING=0
 AGY_PLUGIN_DIR=
+AGY_RECOVERY_META_PENDING=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -697,6 +698,17 @@ spawn_abort_cleanup() {
   if [ "$AGY_PLUGIN_INSTALL_PENDING" = 1 ]; then
     AGY_PLUGIN_INSTALL_PENDING=0
     fm_control_harness_wiring_cleanup agy "$WT" "${STATE_REAL:-$STATE}" "$ID" 2>/dev/null || true
+  fi
+  if [ "$AGY_RECOVERY_META_PENDING" = 1 ]; then
+    AGY_RECOVERY_META_PENDING=0
+    if [ "$status" -ne 0 ] && [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ] \
+       && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      if publish_spawn_recovery_meta; then
+        echo "error: agy setup stopped after endpoint creation; recoverable metadata was preserved at $STATE/$ID.meta" >&2
+      else
+        echo "error: agy setup stopped after endpoint creation and recovery metadata could not be published" >&2
+      fi
+    fi
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
@@ -2472,16 +2484,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 case "$HARNESS" in
   agy*)
-    if ! agy_plugin_prepare "$WT" "$STATE_REAL" "$ID"; then
-      if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
-        if publish_spawn_recovery_meta; then
-          echo "error: agy setup stopped after endpoint creation; recoverable metadata was preserved at $STATE/$ID.meta" >&2
-        else
-          echo "error: agy setup stopped after endpoint creation and recovery metadata could not be published" >&2
-        fi
-      fi
-      exit 1
+    if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+      AGY_RECOVERY_META_PENDING=1
     fi
+    agy_plugin_prepare "$WT" "$STATE_REAL" "$ID" || exit 1
     ;;
 esac
 if [ "$KIND" != secondmate ]; then
@@ -2901,6 +2907,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
+AGY_RECOVERY_META_PENDING=0
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
   # enumerates and locks per task. The set lock is only needed across that
