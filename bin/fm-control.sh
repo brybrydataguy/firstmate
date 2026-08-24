@@ -443,9 +443,25 @@ retire_busy_incarnation() {
 
 quiesce_task_process_scope() {
   local scope_token
-  [ "$HARNESS" = agy ] || return 0
-  scope_token=$(fm_task_process_scope_meta_token "$META") || return 1
-  fm_task_process_scope_quiesce "$STATE" "$ID" "$scope_token" "agy"
+  scope_token=$(fm_task_process_scope_meta_token_explicit "$META") || return 1
+  if [ -z "$scope_token" ] && [ "$HARNESS" = agy ]; then
+    scope_token=$(fm_task_process_scope_meta_token "$META") || return 1
+  fi
+  [ -n "$scope_token" ] || return 0
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$scope_token" "worker"
+}
+
+quiesce_legacy_task_process_scope() {
+  local scope_token
+  scope_token=$(fm_task_process_scope_meta_token_explicit "$META") || return 1
+  if [ -z "$scope_token" ] && [ "$HARNESS" = agy ]; then
+    scope_token=$(fm_task_process_scope_meta_token "$META") || return 1
+  fi
+  [ -n "$scope_token" ] || return 0
+  fm_task_process_scope_record_read "$STATE" "$ID" "$scope_token" || return 1
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 0
+  [ "$FM_TASK_PROCESS_SCOPE_LEGACY" = 1 ] || return 0
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$scope_token" "legacy worker"
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
@@ -464,6 +480,13 @@ do_exit() {
     missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+  quiesce_legacy_task_process_scope || return $?
+  state=$(agent_state)
+  if [ "$state" = dead ]; then
+    retire_busy_incarnation
+    printf 'stopped'
+    return 0
+  fi
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -791,11 +814,22 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line relaunch_worktree_identity=
+  local exit_result state note_line relaunch_worktree_identity= relaunch_scope_token=
   local -a spawn_args
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  if [ "$TARGET_HARNESS" = agy ]; then
+    relaunch_scope_token=$(fm_task_process_scope_meta_token_explicit "$META") \
+      || die "task $ID has malformed worker process-scope ownership metadata"
+    if [ -z "$relaunch_scope_token" ] && [ "$HARNESS" = agy ]; then
+      relaunch_scope_token=$(fm_task_process_scope_meta_token "$META" 2>/dev/null || true)
+    fi
+    [ -n "$relaunch_scope_token" ] \
+      || die "task $ID predates durable worker process scopes, so relaunching it onto agy cannot prove detached prior work is stopped; start a fresh agy worker instead"
+    fm_task_process_scope_record_read "$STATE" "$ID" "$relaunch_scope_token" \
+      || die "task $ID has no trustworthy worker process scope, so relaunching it onto agy is refused before the current agent is stopped"
+  fi
 
   case "$KIND" in
     ship|scout)
@@ -828,15 +862,15 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  if [ "$HARNESS" = agy ]; then
+  if [ "$HARNESS" = agy ] || [ "$TARGET_HARNESS" = agy ]; then
     relaunch_worktree_identity=$(fm_control_harness_worktree_identity agy "$WT") \
-      || die "task $ID's agy worktree identity cannot be retained before relaunch"
+      || die "task $ID's worktree identity cannot be retained before its agy transition"
   fi
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
   [ -z "$relaunch_worktree_identity" ] \
     || fm_control_harness_worktree_identity_verify agy "$WT" "$relaunch_worktree_identity" \
-    || die "task $ID's worktree identity changed while its agy process scope was stopping"
+    || die "task $ID's worktree identity changed while its worker process scope was stopping"
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's

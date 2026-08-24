@@ -22,27 +22,71 @@ pid=$$
 pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || exit 1
 case "$pgid" in ''|*[!0-9]*|0|1) exit 1 ;; esac
 [ "$pgid" = "$pid" ] || {
-  echo "error: agy launch did not receive an isolated foreground process group" >&2
+  echo "error: worker launch did not receive an isolated foreground process group" >&2
   exit 1
 }
-identity=$(fm_task_process_identity "$pid") || exit 1
 fm_task_process_scope_token_valid "$token" || exit 1
-tmp=$(umask 077; mktemp "$state/.$name.XXXXXX") || exit 1
+export FM_TASK_PROCESS_SCOPE_TOKEN=$token
+anchor_identity=$(fm_task_process_identity "$pid") || exit 1
+scope_agent() {
+  local agent_pid=${BASHPID:-} attempt=0
+  case "$agent_pid" in ''|*[!0-9]*) exit 1 ;; esac
+  while [ "$attempt" -lt 200 ]; do
+    if fm_task_process_scope_record_read "$state" "$id" "$token" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
+       && [ "$FM_TASK_PROCESS_SCOPE_AGENT_PID" = "$agent_pid" ]; then
+      exec /bin/sh -c "$launch"
+    fi
+    sleep 0.01
+    attempt=$((attempt + 1))
+  done
+  exit 1
+}
+scope_agent <&0 &
+agent_pid=$!
+agent_identity=$(fm_task_process_identity "$agent_pid") || {
+  kill -KILL "$agent_pid" 2>/dev/null || true
+  exit 1
+}
+agent_pgid=$(fm_task_process_pgid "$agent_pid") || {
+  kill -KILL "$agent_pid" 2>/dev/null || true
+  exit 1
+}
+[ "$agent_pgid" = "$pgid" ] || {
+  kill -KILL "$agent_pid" 2>/dev/null || true
+  exit 1
+}
+tmp=$(umask 077; mktemp "$state/.$name.XXXXXX") || {
+  kill -KILL "$agent_pid" 2>/dev/null || true
+  exit 1
+}
 scope_launch_cleanup() {
   [ -z "${tmp:-}" ] || rm -f -- "$tmp" 2>/dev/null || true
+  [ -z "${agent_pid:-}" ] || kill -KILL "$agent_pid" 2>/dev/null || true
 }
 trap scope_launch_cleanup EXIT
 {
-  printf 'version=1\n'
+  printf 'version=2\n'
   printf 'status=active\n'
   printf 'token=%s\n' "$token"
-  printf 'leader_pid=%s\n' "$pid"
-  printf 'leader_identity=%s\n' "$identity"
+  printf 'anchor_pid=%s\n' "$pid"
+  printf 'anchor_identity=%s\n' "$anchor_identity"
+  printf 'agent_pid=%s\n' "$agent_pid"
+  printf 'agent_identity=%s\n' "$agent_identity"
   printf 'pgid=%s\n' "$pgid"
 } > "$tmp"
 chmod 0600 "$tmp"
 mv -f -- "$tmp" "$record"
 tmp=
 trap - EXIT
-export FM_TASK_PROCESS_SCOPE_TOKEN=$token
-exec /bin/sh -c "$launch"
+trap ':' HUP INT TERM
+launch_status=0
+wait "$agent_pid" || launch_status=$?
+while :; do
+  snapshot=$(fm_task_process_scope_snapshot "$token" "$pgid" 1 "$pid" 1) || exit 1
+  if [ -z "$snapshot" ]; then
+    fm_task_process_scope_mark_empty "$record" "$token" || exit 1
+    exit "$launch_status"
+  fi
+  sleep 0.05
+done

@@ -2532,7 +2532,7 @@ teardown_quiesce_endpoint() {  # <backend> <target> <tab-id> <label> <home> <tas
   done
 }
 
-quiesce_firstmate_home_agy_children() {  # <home>
+quiesce_firstmate_home_scoped_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_kind child_home child_harness child_family
   local child_backend child_target child_wt child_task_tmp child_identity child_scope_token
   sub_state="$home/state"
@@ -2548,9 +2548,15 @@ quiesce_firstmate_home_agy_children() {  # <home>
     child_harness=$(meta_value "$child_meta" harness)
     child_family=$(fm_control_harness_family "$child_harness" 2>/dev/null || true)
     child_wt=$(meta_value "$child_meta" worktree)
+    child_scope_token=$(fm_task_process_scope_meta_token_explicit "$child_meta") || return 1
+    if [ -z "$child_scope_token" ] && [ "$child_family" = agy ]; then
+      child_scope_token=$(fm_task_process_scope_meta_token "$child_meta") || return 1
+    fi
     if [ "$child_family" = agy ] && [ "$child_kind" != secondmate ]; then
       child_identity=$(fm_control_harness_worktree_identity agy "$child_wt") || return 1
       descendant_task_worktree_identity_record "$sub_state" "$child_id" "$child_identity" || return 1
+      fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "agy child" || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
       [ -n "$child_target" ] || {
         echo "error: agy child $child_id has no endpoint to quiesce; preserving its worktree and durable identity" >&2
         return 1
@@ -2558,9 +2564,6 @@ quiesce_firstmate_home_agy_children() {  # <home>
       teardown_quiesce_endpoint \
         "$child_backend" "$child_target" "$(meta_value "$child_meta" zellij_tab_id)" \
         "fm-$child_id" "$home" "$child_id" || return 1
-      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
-      child_scope_token=$(fm_task_process_scope_meta_token "$child_meta") || return 1
-      fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "agy child" || return 1
       fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
       child_task_tmp=$(meta_value "$child_meta" tasktmp)
       (
@@ -2570,11 +2573,13 @@ quiesce_firstmate_home_agy_children() {  # <home>
         reap_task_worktree_processes_strict "child worktree" "$child_wt" "$child_task_tmp"
       ) || return 1
       fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+    elif [ "$child_kind" != secondmate ] && [ -n "$child_scope_token" ]; then
+      fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "worker child" || return 1
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      quiesce_firstmate_home_agy_children "$child_home" || return 1
+      quiesce_firstmate_home_scoped_children "$child_home" || return 1
     fi
   done
 }
@@ -2719,7 +2724,7 @@ if [ "$KIND" = secondmate ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
     preflight_firstmate_home_herdr_children "$HOME_PATH" || exit 1
-    quiesce_firstmate_home_agy_children "$HOME_PATH" || exit 1
+    quiesce_firstmate_home_scoped_children "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
 fi
@@ -2832,6 +2837,9 @@ TEARDOWN_WORKTREE_PROCESSES_REAPED=0
 AGY_WORKTREE_IDENTITY=
 if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
   AGY_WORKTREE_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
+  AGY_SCOPE_TOKEN=$(fm_task_process_scope_meta_token "$META") || exit 1
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy" || exit 1
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
   if [ "$BACKEND" = herdr ] && [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
     if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
       fm_backend_herdr_projection_close_pane_focus_preserving \
@@ -2847,13 +2855,17 @@ if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
       "fm-$ID" "$FM_HOME" "$ID" || exit 1
   fi
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
-  AGY_SCOPE_TOKEN=$(fm_task_process_scope_meta_token "$META") || exit 1
-  fm_task_process_scope_quiesce "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy" || exit 1
-  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
   reap_task_worktree_processes_strict worktree "$WT" "$TASK_TMP" || exit 1
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
   TEARDOWN_ENDPOINT_QUIESCED=1
   TEARDOWN_WORKTREE_PROCESSES_REAPED=1
+fi
+
+if [ "$KIND" != secondmate ] && [ "$HARNESS_FAMILY" != agy ]; then
+  TASK_SCOPE_TOKEN=$(fm_task_process_scope_meta_token_explicit "$META") || exit 1
+  [ -z "$TASK_SCOPE_TOKEN" ] \
+    || fm_task_process_scope_quiesce "$STATE" "$ID" "$TASK_SCOPE_TOKEN" "worker" \
+    || exit 1
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then

@@ -50,7 +50,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh agy
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh agy claude
   printf "%s\n" "$fakebin"
 }
 
@@ -80,7 +80,7 @@ run_agy_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_AGY_PROCESS_SCOPE_START_ATTEMPTS=0 \
+    FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$launchlog.endpoints" PATH="$launch_path" \
     "$SPAWN" "$id" "$proj" agy --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -139,21 +139,23 @@ EOF
 }
 
 test_agy_process_scope_launcher() {
-  local case_dir state record token pid attempt=0 status
+  local case_dir state record token leader child child_file attempt=0 status launch anchor child_stat anchor_stat
   case_dir="$TMP_ROOT/process-scope-launcher"
   state="$case_dir/state"
   record="$state/task-x1.process-scope"
   token=scope-launch-x1
+  child_file="$case_dir/child.pid"
   mkdir -p "$state"
   FM_TASK_PROCESS_SCOPE_STATUS=
-  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" <<'PY' &
+  printf -v launch 'env -i PATH=/usr/bin:/bin /bin/sh -c "sleep 30" & echo $! > %q' "$child_file"
+  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" "$launch" <<'PY' &
 import os
 import sys
 
 os.setpgrp()
-os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", "exec /bin/sleep 5"])
+os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", sys.argv[4]])
 PY
-  pid=$!
+  leader=$!
   while [ "$attempt" -lt 50 ]; do
     if fm_task_process_scope_record_read "$state" task-x1 "$token" 2>/dev/null \
        && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ]; then
@@ -164,26 +166,93 @@ PY
   done
   status=${FM_TASK_PROCESS_SCOPE_STATUS:-}
   if [ "$status" != active ]; then
-    kill -KILL "$pid" 2>/dev/null || true
+    [ ! -f "$child_file" ] || kill -KILL "$(cat "$child_file")" 2>/dev/null || true
     fail "agy process-scope launcher did not publish an active scope"
   fi
-  [ "$FM_TASK_PROCESS_SCOPE_LEADER_PID" = "$pid" ] \
+  attempt=0
+  while [ ! -f "$child_file" ] && [ "$attempt" -lt 50 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  [ -f "$child_file" ] || {
+    kill -KILL "$leader" 2>/dev/null || true
+    fail "agy process-scope launcher did not start its detached child fixture"
+  }
+  child=$(cat "$child_file")
+  anchor=$FM_TASK_PROCESS_SCOPE_ANCHOR_PID
+  [ "$anchor" = "$leader" ] \
     || {
-      kill -KILL "$pid" 2>/dev/null || true
-      fail "agy process-scope launcher recorded the wrong leader"
+      kill -KILL "$child" "$anchor" 2>/dev/null || true
+      fail "agy process-scope launcher did not retain its group leader as ownership anchor"
     }
+  [ "$FM_TASK_PROCESS_SCOPE_PGID" = "$leader" ] \
+    || {
+      kill -KILL "$child" "$anchor" 2>/dev/null || true
+      fail "agy process-scope launcher recorded the wrong process group"
+    }
+  fm_task_process_identity_matches "$anchor" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" \
+    || {
+      kill -KILL "$child" "$anchor" 2>/dev/null || true
+      fail "agy process-scope launcher did not retain a live ownership anchor"
+    }
+  kill -0 "$child" 2>/dev/null \
+    || fail "agy process-scope launcher lost the env-stripped detached child before cleanup"
   fm_task_process_scope_quiesce "$state" task-x1 "$token" agy \
     || fail "agy process-scope launcher could not reap its task process"
-  wait "$pid" 2>/dev/null || true
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL "$pid" 2>/dev/null || true
-    fail "agy process-scope launcher left its task process alive"
+  wait "$leader" 2>/dev/null || true
+  if kill -0 "$child" 2>/dev/null; then
+    child_stat=$(ps -o stat= -p "$child" 2>/dev/null || true)
+    case "$child_stat" in
+      *Z*) ;;
+      *)
+        kill -KILL "$child" 2>/dev/null || true
+        fail "agy process-scope launcher left its env-stripped detached child alive"
+        ;;
+    esac
+  fi
+  attempt=0
+  while kill -0 "$anchor" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+    anchor_stat=$(ps -o stat= -p "$anchor" 2>/dev/null || true)
+    case "$anchor_stat" in *Z*) break ;; esac
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  anchor_stat=$(ps -o stat= -p "$anchor" 2>/dev/null || true)
+  if kill -0 "$anchor" 2>/dev/null && [ -n "$anchor_stat" ]; then
+    case "$anchor_stat" in *Z*) ;; *)
+    kill -KILL "$anchor" 2>/dev/null || true
+    fail "agy process-scope launcher left its ownership anchor alive after retirement"
+    esac
   fi
   fm_task_process_scope_record_read "$state" task-x1 "$token" \
     || fail "agy process-scope launcher lost its durable scope record"
   [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] \
     || fail "agy process-scope launcher did not publish an empty scope after reap"
   pass "agy process-scope launcher owns detached task processes"
+}
+
+test_agy_relaunch_sources_receive_process_scopes() {
+  local rec case_dir home proj wt fakebin launchlog id out launched
+  rec=$(make_spawn_case scoped-source)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  : > "$launchlog"
+  out=$(FM_ROOT_OVERRIDE="" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$launchlog.endpoints" \
+    PATH="$fakebin:$PATH" "$SPAWN" "$id" "$proj" claude \
+    --mode no-mistakes --yolo off 2>&1)
+  assert_contains "$out" "spawned $id harness=claude" "verified agy relaunch source did not spawn: $out"
+  launched=$(cat "$launchlog")
+  assert_contains "$launched" "fm-task-process-launch.sh" \
+    "verified agy relaunch source did not receive a durable process scope"
+  assert_contains "$(cat "$home/state/$id.meta")" "process_scope_token=" \
+    "verified agy relaunch source metadata omitted its process scope"
+  pass "fm-spawn: every verified worker source is scoped for agy transitions"
 }
 
 test_agy_effort_flag_handling() {
@@ -476,6 +545,7 @@ test_agy_crew_dispatch_validation() {
 test_agy_harness_detection
 test_agy_default_model_and_launch_template
 test_agy_process_scope_launcher
+test_agy_relaunch_sources_receive_process_scopes
 test_agy_effort_flag_handling
 test_agy_semantic_busy_lifecycle
 test_agy_manifest_name_accepts_dotted_task_id
