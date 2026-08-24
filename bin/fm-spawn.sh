@@ -1335,22 +1335,13 @@ case "$ARG3" in
     ;;
 esac
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
-fi
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = agy ]; then
-  echo "error: agy is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+TASK_PROCESS_SCOPE_FAMILY=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
+if [ -n "$TASK_PROCESS_SCOPE_FAMILY" ] \
+   && ! fm_control_harness_supports_kind "$TASK_PROCESS_SCOPE_FAMILY" "$KIND"; then
+  echo "error: $TASK_PROCESS_SCOPE_FAMILY is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
-TASK_PROCESS_SCOPE_FAMILY=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
 if [ "$KIND" != secondmate ] \
    && fm_control_harness_supported "$TASK_PROCESS_SCOPE_FAMILY"; then
   TASK_PROCESS_SCOPE_ENABLED=1

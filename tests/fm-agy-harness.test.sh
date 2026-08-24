@@ -557,13 +557,15 @@ SH
 }
 
 test_agy_refuses_secondmate() {
-  local case_dir home fakebin id out
+  local case_dir home fakebin id out raw_id raw_out
   case_dir="$TMP_ROOT/secondmate"
   home="$case_dir/home"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id=agy-secondmate-x1
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  raw_id=agy-raw-secondmate-x1
+  mkdir -p "$home/data/$id" "$home/data/$raw_id" "$home/projects" "$home/state" "$home/config"
   printf 'charter\n' > "$home/data/$id/brief.md"
+  printf 'charter\n' > "$home/data/$raw_id/brief.md"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -571,6 +573,15 @@ test_agy_refuses_secondmate() {
     "$SPAWN" "$id" agy --secondmate 2>&1)
   expect_code 1 $? "agy should be refused for secondmate work"
   assert_contains "$out" "crewmate/scout adapter only" "agy secondmate refusal did not explain the capability boundary: $out"
+
+  raw_out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' PATH="$fakebin:$PATH" \
+    "$SPAWN" "$raw_id" 'agy-cli --dangerously-skip-permissions' --secondmate 2>&1)
+  expect_code 1 $? "raw agy command should be refused for secondmate work"
+  assert_contains "$raw_out" "agy is a verified crewmate/scout adapter only" \
+    "raw agy command bypassed the secondmate capability boundary: $raw_out"
   pass "fm-spawn: agy is restricted to crewmate and scout work"
 }
 
