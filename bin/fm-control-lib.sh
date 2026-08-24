@@ -241,15 +241,22 @@ fm_control_harness_wiring_dirs() {  # <harness> <worktree> <state-dir> <id>
   esac
 }
 
+fm_control_harness_worktree_preflight() {  # <harness> <worktree>
+  local harness=${1-} wt=${2-}
+  harness=$(fm_control_harness_family "$harness") || return 0
+  [ "$harness" = agy ] || return 0
+  if [ -L "$wt" ] || { [ -e "$wt" ] && [ ! -d "$wt" ]; }; then
+    echo "error: refusing agy operation through an unsafe worktree path: $wt" >&2
+    return 1
+  fi
+}
+
 fm_control_harness_wiring_cleanup() {  # <harness> <worktree> <state-dir> <id>
   local harness=${1-} wt=${2-} state=${3-} id=${4-} dir parent path
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   harness=$(fm_control_harness_family "$harness") || return 0
   if [ "$harness" = agy ]; then
-    if [ -L "$wt" ] || { [ -e "$wt" ] && [ ! -d "$wt" ]; }; then
-      echo "error: refusing agy wiring cleanup through an unsafe worktree path: $wt" >&2
-      return 1
-    fi
+    fm_control_harness_worktree_preflight "$harness" "$wt" || return 1
     dir=$(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id") || return 1
     for parent in "$wt/.agents" "$wt/.agents/plugins"; do
       if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then

@@ -1351,6 +1351,33 @@ test_agy_teardown_does_not_follow_replaced_plugin_symlink() {
   pass "agy teardown unlinks a replaced plugin directory without traversal"
 }
 
+test_agy_teardown_rejects_replaced_worktree_before_mutation() {
+  local case_dir hook branch rc
+  case_dir=$(make_case agy-worktree-symlink)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mv "$case_dir/wt" "$case_dir/wt-original"
+  ln -s "$case_dir/project" "$case_dir/wt"
+  hook="$case_dir/project/.claude/settings.local.json"
+  mkdir -p "${hook%/*}"
+  printf 'foreign hook\n' > "$hook"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-worktree-symlink: forced teardown should refuse"
+  assert_grep "unsafe worktree path" "$case_dir/stderr" \
+    "agy-worktree-symlink: teardown did not explain the refusal"
+  [ "$(cat "$hook")" = "foreign hook" ] \
+    || fail "agy-worktree-symlink: teardown removed a hook through the worktree symlink"
+  branch=$(git -C "$case_dir/project" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ "$branch" = main ] \
+    || fail "agy-worktree-symlink: teardown detached the symlink target checkout"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-worktree-symlink: teardown removed task metadata after refusing"
+  pass "agy teardown rejects a replaced worktree before mutation"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2626,6 +2653,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_agy_teardown_does_not_follow_replaced_plugin_symlink
+test_agy_teardown_rejects_replaced_worktree_before_mutation
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
