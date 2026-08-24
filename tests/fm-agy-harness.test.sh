@@ -53,14 +53,14 @@ SH
 }
 
 make_spawn_case() {
-  local name=$1 case_dir home proj wt fakebin launchlog id
+  local name=$1 explicit_id=${2:-} case_dir home proj wt fakebin launchlog id
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  id="agy-$name-x1"
+  id=${explicit_id:-"agy-$name-x1"}
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf "brief for %s\n" "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -188,10 +188,10 @@ EOF
 }
 
 run_agy_hook() {
-  local hooks=$1 event=$2 cmd
+  local hooks=$1 event=$2 payload=${3:-'{}'} cmd
   cmd=$(jq -r ".[\"fm-firstmate-busy\"][\"$event\"][0].command" "$hooks")
   [ -n "$cmd" ] && [ "$cmd" != null ] || fail "agy plugin lacks $event"
-  sh -c "$cmd"
+  printf '%s\n' "$payload" | sh -c "$cmd"
 }
 
 test_agy_semantic_busy_lifecycle() {
@@ -209,9 +209,17 @@ EOF
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy fm-spawn" ] \
     || fail "agy launch turn was not seeded busy"
   rm -f "$state/$id.turn-ended"
-  out=$(run_agy_hook "$hooks" Stop) || fail "agy Stop hook failed: $out"
+  out=$(run_agy_hook "$hooks" Stop '{"fullyIdle":false}') || fail "agy active Stop hook failed: $out"
   printf '%s' "$out" | jq -e '.decision == "allow"' >/dev/null \
     || fail "agy Stop hook did not return its required JSON contract: $out"
+  assert_absent "$state/$id.turn-ended" "agy Stop hook published a turn end while background work remained active"
+  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy fm-spawn" ] \
+    || fail "agy Stop hook cleared semantic state while fullyIdle was false"
+  out=$(run_agy_hook "$hooks" Stop '{}') || fail "agy malformed Stop hook failed: $out"
+  assert_absent "$state/$id.turn-ended" "agy Stop hook published a turn end without fullyIdle true"
+  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy fm-spawn" ] \
+    || fail "agy Stop hook cleared semantic state without fullyIdle true"
+  out=$(run_agy_hook "$hooks" Stop '{"fullyIdle":true}') || fail "agy fully-idle Stop hook failed: $out"
   [ -f "$state/$id.turn-ended" ] || fail "agy Stop hook did not touch the turn-end notification"
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "idle agy-hook" ] \
     || fail "agy Stop hook did not settle semantic state"
@@ -221,6 +229,57 @@ EOF
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy agy-hook" ] \
     || fail "agy PreInvocation hook did not open semantic state"
   pass "fm-spawn and fm-busy-lib: agy lifecycle hooks drive semantic busy state"
+}
+
+test_agy_manifest_name_accepts_dotted_task_id() {
+  local rec case_dir home proj wt fakebin launchlog id out manifest
+  rec=$(make_spawn_case dotted-id agy.fix.v1)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id")
+  expect_code 0 $? "agy spawn should accept a path-safe dotted task ID: $out"
+  manifest="$wt/.agents/plugins/fm-firstmate-busy-$id/plugin.json"
+  jq -e '.name == "fm-firstmate-busy"' "$manifest" >/dev/null \
+    || fail "agy plugin manifest name is not schema-safe for a dotted task ID: $(cat "$manifest")"
+  pass "fm-spawn: agy plugin manifest supports dotted task IDs"
+}
+
+test_agy_plugin_collisions_are_refused() {
+  local rec case_dir home proj wt fakebin launchlog id out plugin exclude
+  rec=$(make_spawn_case plugin-collision)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  plugin="$wt/.agents/plugins/fm-firstmate-busy-$id"
+  mkdir -p "$plugin"
+  printf 'project-owned\n' > "$plugin/plugin.json"
+  exclude=$(git -C "$wt" rev-parse --git-path info/exclude)
+  printf '/.agents/plugins/fm-firstmate-busy-%s/\n' "$id" >> "$exclude"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id")
+  expect_code 1 $? "agy spawn should refuse an existing plugin directory"
+  assert_contains "$out" "plugin path already exists" "agy collision refusal was not actionable: $out"
+  [ "$(cat "$plugin/plugin.json")" = project-owned ] || fail "agy spawn overwrote a project-owned plugin manifest"
+  assert_absent "$plugin/hooks.json" "agy spawn wrote hooks into a project-owned plugin directory"
+  assert_absent "$home/state/$id.meta" "agy plugin collision published task metadata"
+
+  rec=$(make_spawn_case plugin-symlink)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.agents/plugins" "$wt/agy-plugin-target"
+  printf 'target-owned\n' > "$wt/agy-plugin-target/sentinel"
+  plugin="$wt/.agents/plugins/fm-firstmate-busy-$id"
+  ln -s ../../agy-plugin-target "$plugin"
+  exclude=$(git -C "$wt" rev-parse --git-path info/exclude)
+  printf '/.agents/plugins/fm-firstmate-busy-%s\n/agy-plugin-target/\n' "$id" >> "$exclude"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id")
+  expect_code 1 $? "agy spawn should refuse a symlinked plugin directory"
+  assert_contains "$out" "plugin path is a symlink" "agy symlink refusal was not actionable: $out"
+  [ "$(cat "$wt/agy-plugin-target/sentinel")" = target-owned ] || fail "agy spawn changed the symlink target"
+  assert_absent "$wt/agy-plugin-target/plugin.json" "agy spawn followed the plugin symlink for its manifest"
+  assert_absent "$wt/agy-plugin-target/hooks.json" "agy spawn followed the plugin symlink for its hooks"
+  pass "fm-spawn: agy plugin installation refuses collisions and symlinks"
 }
 
 test_agy_missing_binary_refuses_before_endpoint_creation() {
@@ -318,6 +377,8 @@ test_agy_harness_detection
 test_agy_default_model_and_launch_template
 test_agy_effort_flag_handling
 test_agy_semantic_busy_lifecycle
+test_agy_manifest_name_accepts_dotted_task_id
+test_agy_plugin_collisions_are_refused
 test_agy_missing_binary_refuses_before_endpoint_creation
 test_agy_refuses_secondmate
 test_agy_busy_matching_and_liveness

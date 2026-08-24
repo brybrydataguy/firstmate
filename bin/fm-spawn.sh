@@ -670,6 +670,8 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+AGY_PLUGIN_INSTALL_PENDING=0
+AGY_PLUGIN_DIR=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -692,6 +694,13 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$AGY_PLUGIN_INSTALL_PENDING" = 1 ]; then
+    AGY_PLUGIN_INSTALL_PENDING=0
+    if [ -d "$AGY_PLUGIN_DIR" ] && [ ! -L "$AGY_PLUGIN_DIR" ]; then
+      rm -f -- "$AGY_PLUGIN_DIR/plugin.json" "$AGY_PLUGIN_DIR/hooks.json" 2>/dev/null || true
+      rmdir -- "$AGY_PLUGIN_DIR" 2>/dev/null || true
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -838,6 +847,45 @@ EOF
   done <<EOF
 $(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id")
 EOF
+}
+
+agy_plugin_prepare() {
+  local wt=$1 state=$2 id=$3 agents_dir plugins_dir plugin_dir path
+  plugin_dir=$(fm_control_harness_wiring_dirs agy "$wt" "$state" "$id") || return 1
+  plugins_dir=${plugin_dir%/*}
+  agents_dir=${plugins_dir%/*}
+  for path in "$agents_dir" "$plugins_dir"; do
+    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+      echo "error: refusing agy spawn because plugin parent is not a real directory: $path" >&2
+      return 1
+    fi
+  done
+  if [ -L "$plugin_dir" ]; then
+    echo "error: refusing agy spawn because plugin path is a symlink: $plugin_dir" >&2
+    return 1
+  fi
+  if [ -e "$plugin_dir" ]; then
+    echo "error: refusing agy spawn because plugin path already exists: $plugin_dir" >&2
+    return 1
+  fi
+  for path in "$agents_dir" "$plugins_dir"; do
+    if [ ! -e "$path" ]; then
+      mkdir -- "$path" || {
+        echo "error: could not create agy plugin parent: $path" >&2
+        return 1
+      }
+    fi
+    if [ -L "$path" ] || [ ! -d "$path" ]; then
+      echo "error: refusing agy spawn because plugin parent is not a real directory: $path" >&2
+      return 1
+    fi
+  done
+  mkdir -- "$plugin_dir" || {
+    echo "error: could not create exclusive agy plugin directory: $plugin_dir" >&2
+    return 1
+  }
+  AGY_PLUGIN_DIR=$plugin_dir
+  AGY_PLUGIN_INSTALL_PENDING=1
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -1547,6 +1595,10 @@ esac
 case "$LAUNCH" in
   *__AGYBIN__*)
     AGY_BIN=$(resolve_agy_binary) || exit 1
+    AGY_JQ_BIN=$(command -v jq) || {
+      echo "error: jq executable not found on PATH; agy lifecycle hooks require jq" >&2
+      exit 1
+    }
     LAUNCH=${LAUNCH//__AGYBIN__/$(shell_quote "$AGY_BIN")}
     ;;
 esac
@@ -2395,6 +2447,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
+case "$HARNESS" in
+  agy*) agy_plugin_prepare "$WT" "$STATE_REAL" "$ID" || exit 1 ;;
+esac
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
@@ -2541,18 +2596,24 @@ export default function (pi: any) {
 EOF
       ;;
     agy*)
-      AGY_PLUGIN_DIR="$WT/.agents/plugins/fm-firstmate-busy-$ID"
-      mkdir -p "$AGY_PLUGIN_DIR"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '%s\\n' '{}'")
-      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; printf '%s\\n' '{\"decision\":\"allow\"}'")
-      cat > "$AGY_PLUGIN_DIR/plugin.json" <<EOF
-{"name":"fm-firstmate-busy-$ID"}
+      j_stop=$(json_escape "if $(shell_quote "$AGY_JQ_BIN") -e '.fullyIdle == true' >/dev/null 2>&1; then touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; fi; printf '%s\\n' '{\"decision\":\"allow\"}'")
+      if ! (set -o noclobber; cat > "$AGY_PLUGIN_DIR/plugin.json" <<EOF
+{"name":"fm-firstmate-busy"}
 EOF
-      cat > "$AGY_PLUGIN_DIR/hooks.json" <<EOF
+      ); then
+        echo "error: refusing to replace an existing agy plugin manifest: $AGY_PLUGIN_DIR/plugin.json" >&2
+        exit 1
+      fi
+      if ! (set -o noclobber; cat > "$AGY_PLUGIN_DIR/hooks.json" <<EOF
 {"fm-firstmate-busy":{"PreInvocation":[{"type":"command","command":"$j_submit"}],"Stop":[{"type":"command","command":"$j_stop"}]}}
 EOF
+      ); then
+        echo "error: refusing to replace existing agy lifecycle hooks: $AGY_PLUGIN_DIR/hooks.json" >&2
+        exit 1
+      fi
       exclude_path ".agents/plugins/fm-firstmate-busy-$ID/plugin.json"
       exclude_path ".agents/plugins/fm-firstmate-busy-$ID/hooks.json"
       ;;
@@ -2963,4 +3024,5 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+AGY_PLUGIN_INSTALL_PENDING=0
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
