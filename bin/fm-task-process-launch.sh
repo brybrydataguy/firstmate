@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# Launch one verified worker under the durable scope owned by
+# `fm-task-process-lib.sh`.
+# Usage: fm-task-process-launch.sh <record> <token> <prior-token|-> <launch> <enclosure|->
+# The caller must place this process in its own foreground process group.
+# A real enclosure is validated as util-linux `unshare` with a user and PID
+# namespace; `-` keeps portable process-group containment.
+# The launcher publishes `active` before allowing the agent child to exec, stays
+# alive as the immutable ownership anchor, and publishes `empty` only after the
+# agent and every remaining scoped descendant have exited.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

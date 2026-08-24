@@ -526,9 +526,12 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-spawn"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn"}}}\n' "$wt" > "$RESP/3.out"
+  # This fake records terminal input but does not execute it. The dedicated
+  # process-scope suite exercises the launcher with real processes; this case
+  # verifies that the Orca transport receives the scoped launch command.
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   expect_code 0 $? "fm-spawn.sh --backend orca should succeed with fake Orca"$'\n'"$out"
   assert_contains "$out" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=fm-$id worktree=$wt" \
@@ -538,6 +541,9 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "terminal=term-spawn" "$state/$id.meta" "meta missing terminal handle"
   assert_grep "orca_worktree_id=wt-spawn" "$state/$id.meta" "meta missing Orca worktree id"
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
+  assert_grep "process_scope_token=" "$state/$id.meta" "meta missing worker process-scope token"
+  assert_contains "$(cat "$log")" "fm-task-process-launch.sh" \
+    "spawn did not send the worker process-scope launcher through Orca"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \

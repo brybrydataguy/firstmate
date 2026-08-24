@@ -29,8 +29,10 @@
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent).
+#              the backend's recovery-grade classifier reports the agent gone,
+#              and a durable worker process scope is empty when one is recorded.
+#              Already-stopped with no live scoped processes is success
+#              (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use

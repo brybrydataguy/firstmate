@@ -113,20 +113,21 @@
 #     that verified run instance. A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
-#   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
-#     started under the worktree (or its per-task tasktmp) does not receive the
-#     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
-#     process group, so it survives reparented to init (observed 2026-08-03:
-#     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
-#     hours with no live task meta to attribute them to once teardown had
-#     already removed it). reap_task_worktree_processes finds every process
-#     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#   Fix 2 - reap leaked descendant processes. New verified ship and scout
+#     workers carry a generation-bound durable process scope owned by
+#     bin/fm-task-process-lib.sh. Teardown validates and quiesces that scope
+#     before inspecting or removing its worktree, so detached work remains
+#     attributable through its recorded group after changing cwd or clearing
+#     the task token, and through the token after leaving that group. An agy
+#     worktree transition additionally requires PID-namespace containment,
+#     retains the worktree's filesystem identity across process and endpoint
+#     quiescence, and refuses unless endpoint absence is confirmed. Legacy
+#     tasks and any remaining out-of-scope stragglers keep the cwd fallback:
+#     reap_task_worktree_processes finds processes whose current directory is
+#     the task's unique worktree or tasktmp via `lsof -a -d cwd`, then signals
+#     only survivors whose creation-time identities still match. Both paths are
+#     idempotent, and any unprovable ownership or incomplete reap refuses before
+#     the destructive return.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it

@@ -173,7 +173,7 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Semantic busy state
 
-The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
+The established per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them, and Antigravity CLI was verified through the same boundary on 2026-08-24.
 Each pass polled `state/<id>.busy-state` while a real turn ran.
 
 | Harness | Version verified | Semantic source | Observed result |

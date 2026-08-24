@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
 
+# Durable process-scope record and cleanup owner for verified ship and scout workers.
+# `state/<id>.meta` binds the record through `process_scope_token=`, and the
+# matching `state/<id>.process-scope` is a private versioned record with one of
+# two states: `active` carries containment, ownership-anchor, agent-process, and
+# process-group identities, while `empty` carries only containment and the token.
+# Writers publish each state atomically and readers reject symlinks, malformed
+# fields, stale tokens, changed process identities, and an owned group that has
+# moved, so no lifecycle operation signals processes from an unproved scope.
+# `fm-task-process-launch.sh` produces the record and retains the ownership
+# anchor until the agent and every scoped descendant are gone.
+# Lifecycle callers quiesce the scope before relaunch or worktree removal;
+# PID-namespace containment is an additional explicit gate for transitions that
+# cannot safely rely on portable process-group ownership alone.
+
 fm_task_process_scope_path() {
   printf '%s/%s.process-scope\n' "$1" "$2"
 }

@@ -935,9 +935,9 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
-# fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
-# from a raw command records that command's basename rather than the exact
-# adapter name. Retirement must resolve the same way, or a task recorded as
+# fm-spawn arms per-task wiring on harness PREFIXES, because a raw command with
+# no declared --raw-harness identity records its command basename rather than
+# the exact adapter name. Retirement must resolve the same way, or a task recorded as
 # `grok-2` would have its turn-end token and hook pointer armed and never
 # retired - leaving a registry entry that outlives the agent that owned it.
 test_prefixed_prior_harness_wiring_is_still_retired() {

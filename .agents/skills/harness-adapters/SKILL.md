@@ -134,7 +134,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
-| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified 2026-08-24 on Antigravity CLI (`agy`) 1.1.19. Default model is `gemini-3.7-flash-high`; an explicit low or medium effort without a model selects the matching variant. Model variants already encode effort, so matching `--effort` is omitted and conflicting combinations are refused. `xhigh` and `max` are capped to `high`. |
+| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified 2026-08-24 on Antigravity CLI (`agy`) 1.1.19. [`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns Firstmate's current default-model and effort-translation contract. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -160,8 +160,8 @@ For an unfamiliar harness or model namespace, establish support and provider ide
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+When a requested effort value has no verified adapter mapping, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
+This preserves launch success instead of passing a known-bad value; [`docs/configuration.md`](../../../docs/configuration.md#harness-support) records deliberate translations such as agy's `xhigh` and `max` cap to `high`.
 For Cursor, select the intended reasoning class through a model id the account's own `--list-models` actually returns, and leave the separate effort axis unset.
 
 ## no-mistakes skill invocation
@@ -547,9 +547,9 @@ It is not verified for secondmate or primary work.
 | Fact | Value |
 |---|---|
 | Binary | Executable `agy` from `PATH`; verified on version 1.1.19. |
-| Process enclosure | Linux launches use user and PID namespaces through util-linux `unshare` when the host supports them, while macOS and other hosts retain the portable process-group scope so fresh workers, including Orca-backed agy workers, can launch; relaunch and teardown paths that would mutate an agy worktree fail closed without PID namespace containment. |
+| Process enclosure | [`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns the supported host behavior and agy transition limit; never override a process-scope refusal. |
 | Launch | `agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`; positional prompts are rejected with exit code 2. |
-| Models | `gemini-3.7-flash-high` (default), `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, Claude Sonnet/Opus models. Authoritative discovery: `agy models`. |
+| Models | `gemini-3.7-flash-high`, `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, and Claude Sonnet/Opus models were present in the verified catalog. Authoritative discovery: `agy models`; Firstmate's current default is owned by [`docs/configuration.md`](../../../docs/configuration.md#harness-support). |
 | Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn. `Stop` with `fullyIdle: true` closes it immediately. `Stop` with `fullyIdle: false` records `unknown` because the official project hook surface provides no later background-completion event; malformed payloads also record `unknown`. A later `PreInvocation` or fully idle `Stop` supersedes that containment state. |
 | Delivery busy token | `esc to cancel`, the live footer present only while a turn is running. |
 | Exit command | `/exit` or `/quit` or `Ctrl+D` (exits cleanly with status 0). |
@@ -560,7 +560,7 @@ It is not verified for secondmate or primary work.
 | Hooks | Natively supports `.agents/hooks.json` and project plugin hooks including `Stop`, `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`. Project hooks are strictly gated on workspace trust. |
 | Environment markers | Child tool processes receive `ANTIGRAVITY_LS_VERSION=cli-1.1.19` and `ANTIGRAVITY_SOURCE_METADATA`. |
 | Composer | Horizontal rule borders (`───`) enclosing prompt glyph `>`. Bordered empty composer correctly classifies as `empty`. |
-| Effort | `--effort low\|medium\|high`. Without an explicit model, low and medium select matching Flash variants while all other levels select the high default. Firstmate omits `--effort` for variant models, refuses a conflicting explicit combination, and caps `xhigh`/`max` to `high` for generic model names. |
+| Effort | The verified CLI accepts `--effort low\|medium\|high`; [`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns Firstmate's translation from the shared effort vocabulary. |
 | Resumption | Resumes prior conversations via `agy --conversation <id>` or `--continue` / `-c`. |
 
 `agy` delivers the launch brief through `--prompt-interactive` (`-i`) as a single interactive turn.
@@ -572,6 +572,5 @@ Accepted trust is saved to `~/.gemini/antigravity-cli/settings.json` under `trus
 Firstmate writes an isolated project plugin under `.agents/plugins/` so existing project hooks remain untouched.
 Its `PreInvocation` and `Stop` hooks are gated on workspace trust and fire normally once trust is granted.
 The lifecycle observer requires `jq` and uses only the documented hook payload.
-Firstmate launches every verified worker adapter inside a durable task process scope and records whether the host supplied PID namespace containment or portable process-group tracking.
-An agy transition may change plugin wiring or remove its worktree only when the recorded scope has PID namespace containment; hosts without it can launch a fresh agy worker but must stop it and preserve its worktree instead of relaunching or tearing it down automatically.
+[`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns current worker process-scope behavior and the host-dependent agy transition limit.
 Antigravity CLI 1.1.9 and newer cap consecutive `decision: continue` responses, so Firstmate does not use continuation retries as completion state.
