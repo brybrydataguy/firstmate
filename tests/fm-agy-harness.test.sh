@@ -50,6 +50,23 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/unshare" <<'SH'
+#!/usr/bin/env bash
+set -u
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--map-current-user|--pid|--fork|--kill-child=SIGKILL|--mount-proc) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = /bin/sh ] && [ "${2:-}" = -c ] \
+   && [ "${3:-}" = '[ "$$" -eq 1 ]' ]; then
+  exit 0
+fi
+exec "$@"
+SH
+  chmod +x "$fakebin/unshare"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh agy claude
   printf "%s\n" "$fakebin"
 }
@@ -139,21 +156,22 @@ EOF
 }
 
 test_agy_process_scope_launcher() {
-  local case_dir state record token leader child child_file attempt=0 status launch anchor child_stat anchor_stat
+  local case_dir state record token leader child child_file attempt=0 status launch anchor child_stat anchor_stat fakebin
   case_dir="$TMP_ROOT/process-scope-launcher"
   state="$case_dir/state"
   record="$state/task-x1.process-scope"
   token=scope-launch-x1
   child_file="$case_dir/child.pid"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$state"
   FM_TASK_PROCESS_SCOPE_STATUS=
   printf -v launch 'env -i PATH=/usr/bin:/bin /bin/sh -c "sleep 30" & echo $! > %q' "$child_file"
-  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" "$launch" <<'PY' &
+  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" "$launch" "$fakebin/unshare" <<'PY' &
 import os
 import sys
 
 os.setpgrp()
-os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", sys.argv[4]])
+os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", sys.argv[4], sys.argv[5]])
 PY
   leader=$!
   while [ "$attempt" -lt 50 ]; do
@@ -229,6 +247,50 @@ PY
   [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] \
     || fail "agy process-scope launcher did not publish an empty scope after reap"
   pass "agy process-scope launcher owns detached task processes"
+}
+
+test_agy_process_scope_wait_survives_signals() {
+  local case_dir state record token leader attempt=0 fakebin agent agent_identity
+  case_dir="$TMP_ROOT/process-scope-signal"
+  state="$case_dir/state"
+  record="$state/task-x2.process-scope"
+  token=scope-launch-x2
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$state"
+  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" "$fakebin/unshare" <<'PY' &
+import os
+import sys
+
+os.setpgrp()
+os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", "sleep 30", sys.argv[4]])
+PY
+  leader=$!
+  while [ "$attempt" -lt 100 ]; do
+    if fm_task_process_scope_record_read "$state" task-x2 "$token" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ]; then
+      break
+    fi
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  [ "${FM_TASK_PROCESS_SCOPE_STATUS:-}" = active ] || {
+    kill -KILL "$leader" 2>/dev/null || true
+    fail "agy process-scope signal fixture did not publish an active scope"
+  }
+  agent=$FM_TASK_PROCESS_SCOPE_AGENT_PID
+  agent_identity=$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY
+  kill -HUP "$leader"
+  sleep 0.05
+  fm_task_process_scope_record_read "$state" task-x2 "$token" \
+    || fail "agy process-scope signal interrupted its durable record"
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
+    || fail "agy process-scope signal prematurely retired a live worker"
+  fm_task_process_identity_matches "$agent" "$agent_identity" \
+    || fail "agy process-scope signal lost its live worker identity"
+  fm_task_process_scope_quiesce "$state" task-x2 "$token" agy \
+    || fail "agy process-scope signal fixture could not quiesce"
+  wait "$leader" 2>/dev/null || true
+  pass "agy process-scope launcher survives interrupted waits"
 }
 
 test_agy_relaunch_sources_receive_process_scopes() {
@@ -467,6 +529,26 @@ EOF
   pass "fm-spawn: missing agy refuses before endpoint creation"
 }
 
+test_agy_missing_process_enclosure_refuses_before_endpoint_creation() {
+  local rec case_dir home proj wt fakebin launchlog id out rc
+  rec=$(make_spawn_case missing-enclosure)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  cat > "$fakebin/unshare" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/unshare"
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id"); rc=$?
+  expect_code 1 "$rc" "agy should refuse a host without PID namespace containment"
+  assert_contains "$out" "cannot create the user and PID namespace" \
+    "agy process-enclosure refusal did not explain the containment requirement: $out"
+  [ ! -s "$launchlog.endpoints" ] \
+    || fail "agy allocated an endpoint before refusing its missing process enclosure"
+  pass "fm-spawn: agy refuses unsupported process enclosure before allocation"
+}
+
 test_agy_refuses_secondmate() {
   local case_dir home fakebin id out
   case_dir="$TMP_ROOT/secondmate"
@@ -545,6 +627,7 @@ test_agy_crew_dispatch_validation() {
 test_agy_harness_detection
 test_agy_default_model_and_launch_template
 test_agy_process_scope_launcher
+test_agy_process_scope_wait_survives_signals
 test_agy_relaunch_sources_receive_process_scopes
 test_agy_effort_flag_handling
 test_agy_semantic_busy_lifecycle
@@ -552,6 +635,7 @@ test_agy_manifest_name_accepts_dotted_task_id
 test_agy_plugin_collisions_are_refused
 test_agy_post_allocation_failure_preserves_recovery_metadata
 test_agy_missing_binary_refuses_before_endpoint_creation
+test_agy_missing_process_enclosure_refuses_before_endpoint_creation
 test_agy_refuses_secondmate
 test_agy_busy_matching_and_liveness
 test_agy_crew_dispatch_validation

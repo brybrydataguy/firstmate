@@ -4,11 +4,12 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-task-process-lib.sh"
 
-[ "$#" -eq 4 ] || exit 2
+[ "$#" -eq 5 ] || exit 2
 record=$1
 token=$2
 prior_token=$3
 launch=$4
+enclosure=$5
 state=${record%/*}
 name=${record##*/}
 id=${name%.process-scope}
@@ -26,6 +27,10 @@ case "$pgid" in ''|*[!0-9]*|0|1) exit 1 ;; esac
   exit 1
 }
 fm_task_process_scope_token_valid "$token" || exit 1
+fm_task_process_enclosure_validate "$enclosure" || {
+  echo "error: worker launch cannot establish its required PID namespace enclosure" >&2
+  exit 1
+}
 export FM_TASK_PROCESS_SCOPE_TOKEN=$token
 anchor_identity=$(fm_task_process_identity "$pid") || exit 1
 scope_agent() {
@@ -35,7 +40,8 @@ scope_agent() {
     if fm_task_process_scope_record_read "$state" "$id" "$token" 2>/dev/null \
        && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
        && [ "$FM_TASK_PROCESS_SCOPE_AGENT_PID" = "$agent_pid" ]; then
-      exec /bin/sh -c "$launch"
+      exec "$enclosure" --user --map-current-user --pid --fork \
+        --kill-child=SIGKILL --mount-proc -- /bin/sh -c "$launch"
     fi
     sleep 0.01
     attempt=$((attempt + 1))
@@ -81,7 +87,11 @@ tmp=
 trap - EXIT
 trap ':' HUP INT TERM
 launch_status=0
-wait "$agent_pid" || launch_status=$?
+while :; do
+  launch_status=0
+  wait "$agent_pid" || launch_status=$?
+  fm_task_process_identity_matches "$agent_pid" "$agent_identity" || break
+done
 while :; do
   snapshot=$(fm_task_process_scope_snapshot "$token" "$pgid" 1 "$pid" 1) || exit 1
   if [ -z "$snapshot" ]; then

@@ -678,6 +678,7 @@ AGY_RECOVERY_META_PENDING=0
 TASK_PROCESS_SCOPE_ENABLED=0
 TASK_SCOPE_PRIOR_TOKEN=
 TASK_SCOPE_TOKEN=
+TASK_SCOPE_ENCLOSURE=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -1658,6 +1659,7 @@ if [ "$TASK_PROCESS_SCOPE_ENABLED" = 1 ]; then
     echo "error: worker process-scope launcher is missing or not executable: $SCRIPT_DIR/fm-task-process-launch.sh" >&2
     exit 1
   }
+  TASK_SCOPE_ENCLOSURE=$(fm_task_process_enclosure_resolve) || exit 1
   TASK_SCOPE_PATH=$(fm_task_process_scope_path "$STATE" "$ID") || exit 1
   if [ "$RELAUNCH" -eq 0 ] && { [ -e "$TASK_SCOPE_PATH" ] || [ -L "$TASK_SCOPE_PATH" ]; }; then
     echo "error: refusing worker spawn because a prior process-scope record still exists: $TASK_SCOPE_PATH" >&2
@@ -3079,7 +3081,7 @@ if [ "$TASK_PROCESS_SCOPE_ENABLED" = 1 ]; then
     }
     TASK_SCOPE_LAUNCH_PRIOR_TOKEN=$TASK_SCOPE_PRIOR_TOKEN
   fi
-  LAUNCH="$(shell_quote "$SCRIPT_DIR/fm-task-process-launch.sh") $(shell_quote "$TASK_SCOPE_PATH") $(shell_quote "$TASK_SCOPE_TOKEN") $(shell_quote "$TASK_SCOPE_LAUNCH_PRIOR_TOKEN") $(shell_quote "$LAUNCH")"
+  LAUNCH="$(shell_quote "$SCRIPT_DIR/fm-task-process-launch.sh") $(shell_quote "$TASK_SCOPE_PATH") $(shell_quote "$TASK_SCOPE_TOKEN") $(shell_quote "$TASK_SCOPE_LAUNCH_PRIOR_TOKEN") $(shell_quote "$LAUNCH") $(shell_quote "$TASK_SCOPE_ENCLOSURE")"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

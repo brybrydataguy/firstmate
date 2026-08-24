@@ -443,12 +443,38 @@ retire_busy_incarnation() {
 
 quiesce_task_process_scope() {
   local scope_token
+  scope_token=$(task_process_scope_token) || return 1
+  [ -n "$scope_token" ] || return 0
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$scope_token" "worker"
+}
+
+task_process_scope_token() {
+  local scope_token
   scope_token=$(fm_task_process_scope_meta_token_explicit "$META") || return 1
   if [ -z "$scope_token" ] && [ "$HARNESS" = agy ]; then
     scope_token=$(fm_task_process_scope_meta_token "$META") || return 1
   fi
-  [ -n "$scope_token" ] || return 0
-  fm_task_process_scope_quiesce "$STATE" "$ID" "$scope_token" "worker"
+  printf '%s' "$scope_token"
+}
+
+wait_scoped_agent_exit() {
+  local scope_token elapsed=0
+  scope_token=$(task_process_scope_token) || return 1
+  [ -n "$scope_token" ] || return 2
+  fm_task_process_scope_record_read "$STATE" "$ID" "$scope_token" || return 1
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 2
+  [ "$FM_TASK_PROCESS_SCOPE_LEGACY" != 1 ] || return 2
+  while :; do
+    fm_task_process_scope_record_read "$STATE" "$ID" "$scope_token" || return 1
+    [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] && return 0
+    fm_task_process_identity_matches \
+      "$FM_TASK_PROCESS_SCOPE_AGENT_PID" "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY" \
+      || return 0
+    awk -v e="$elapsed" -v t="$EXIT_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  return 1
 }
 
 quiesce_legacy_task_process_scope() {
@@ -484,6 +510,7 @@ do_exit() {
   state=$(agent_state)
   if [ "$state" = dead ]; then
     retire_busy_incarnation
+    quiesce_task_process_scope || return $?
     printf 'stopped'
     return 0
   fi
@@ -509,20 +536,36 @@ do_exit() {
   # The submit verdict is NOT the postcondition here: a successful exit command
   # destroys the composer the verdict is read from, so a post-exit read can
   # legitimately report anything. Only a hard transport failure aborts; the
-  # authoritative proof is the agent-state wait below. The retried Enter still
-  # matters, because a slash command opens a completion popup on some TUIs that
-  # swallows the first Enter.
+  # authoritative proof is the scoped agent identity when present, followed by
+  # endpoint state after the scope is empty. The retried Enter still matters,
+  # because a slash command opens a completion popup on some TUIs that swallows
+  # the first Enter.
   verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
-  }
+  if wait_scoped_agent_exit; then
+    retire_busy_incarnation
+    quiesce_task_process_scope || return $?
+    state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+      die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the worker scope stopped but its endpoint did not return to a shell within ${EXIT_WAIT}s"
+    }
+  else
+    case $? in
+      2)
+        state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+          die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
+        }
+        retire_busy_incarnation
+        quiesce_task_process_scope || return $?
+        ;;
+      *)
+        die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered process-scope=active exit=unconfirmed; the scoped agent did not stop within ${EXIT_WAIT}s"
+        ;;
+    esac
+  fi
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
-  retire_busy_incarnation
-  quiesce_task_process_scope || return $?
   printf 'stopped'
 }
 

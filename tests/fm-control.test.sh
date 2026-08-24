@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-process-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
@@ -97,6 +99,11 @@ case "${1:-}" in
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
         printf 'zsh' > "$D/command"
+        if [ -n "${FM_FAKE_SCOPE_RECORD:-}" ]; then
+          : > "$D/scope-exit-sent"
+          agent=$(awk -F= '$1 == "agent_pid" {print $2}' "$FM_FAKE_SCOPE_RECORD")
+          [ -z "$agent" ] || kill -TERM "$agent" 2>/dev/null || true
+        fi
       fi
       case "$payload" in
         *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
@@ -120,7 +127,20 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          if [ -n "${FM_FAKE_SCOPE_RECORD:-}" ] && [ -e "$D/scope-exit-sent" ]; then
+            anchor=$(awk -F= '$1 == "anchor_pid" {print $2}' "$FM_FAKE_SCOPE_RECORD")
+            stat=$(ps -o stat= -p "$anchor" 2>/dev/null || true)
+            case "$stat" in
+              ''|*Z*) printf 'zsh\n' ;;
+              *) printf 'sleep\n' ;;
+            esac
+          else
+            cat "$D/command"
+            printf '\n'
+          fi
+          exit 0
+          ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
@@ -135,8 +155,11 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  cat > "$fb/sleep" <<'SH'
+cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_FAKE_REAL_SLEEP:-}" ]; then
+  exec /bin/sleep "$@"
+fi
 if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
    && [ -e "$FM_FAKE_DIR/muse-ack-pending" ]; then
   rm -f "$FM_FAKE_DIR/muse-ack-pending"
@@ -146,6 +169,23 @@ fi
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/unshare" <<'SH'
+#!/usr/bin/env bash
+set -u
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--map-current-user|--pid|--fork|--kill-child=SIGKILL|--mount-proc) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = /bin/sh ] && [ "${2:-}" = -c ] \
+   && [ "${3:-}" = '[ "$$" -eq 1 ]' ]; then
+  exit 0
+fi
+exec "$@"
+SH
+  chmod +x "$fb/unshare"
   printf '%s\n' "$fb"
 }
 
@@ -182,8 +222,15 @@ add_task() {
     echo "yolo=off"
     echo "model=default"
     echo "effort=default"
+    echo "spawn_gen=test-$id"
+    echo "process_scope_token=test-$id"
     [ "$backend" = tmux ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
+  {
+    echo "version=2"
+    echo "status=empty"
+    echo "token=test-$id"
+  } > "$home/state/$id.process-scope"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
 }
@@ -198,6 +245,8 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_SCOPE_RECORD="${FM_FAKE_SCOPE_RECORD:-}" \
+    FM_FAKE_REAL_SLEEP="${FM_FAKE_REAL_SLEEP:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -893,6 +942,49 @@ test_agent_that_does_not_stop_fails_closed() {
   pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
+test_scoped_exit_quiesces_before_dead_state_proof() {
+  local dir state record token leader attempt=0 out rc
+  dir=$(new_case scoped-exit)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  state="$dir/home/state"
+  record="$state/t1.process-scope"
+  token=scoped-exit-t1
+  rm -f "$record"
+  printf 'process_scope_token=%s\n' "$token" >> "$state/t1.meta"
+  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" "$dir/fakebin/unshare" <<'PY' &
+import os
+import sys
+
+os.setpgrp()
+os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", "/bin/sleep 30 & wait", sys.argv[4]])
+PY
+  leader=$!
+  while [ "$attempt" -lt 100 ]; do
+    if fm_task_process_scope_record_read "$state" t1 "$token" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ]; then
+      break
+    fi
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  [ "${FM_TASK_PROCESS_SCOPE_STATUS:-}" = active ] || {
+    kill -KILL "$leader" 2>/dev/null || true
+    fail "scoped exit fixture did not publish an active worker scope"
+  }
+  out=$(FM_FAKE_SCOPE_RECORD="$record" FM_FAKE_REAL_SLEEP=1 \
+    run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "scoped exit should quiesce before endpoint dead-state proof"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=agy" \
+    "scoped exit did not report its proven stop: $out"
+  fm_task_process_scope_record_read "$state" t1 "$token" \
+    || fail "scoped exit lost its durable process-scope record"
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] \
+    || fail "scoped exit did not retire its process scope"
+  wait "$leader" 2>/dev/null || true
+  pass "fm-control exit: scoped workers quiesce before endpoint proof"
+}
+
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
   local dir out rc
   dir=$(new_case nosettle)
@@ -1001,6 +1093,7 @@ test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
+test_scoped_exit_quiesces_before_dead_state_proof
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker

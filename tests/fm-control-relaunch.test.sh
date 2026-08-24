@@ -122,6 +122,23 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/unshare" <<'SH'
+#!/usr/bin/env bash
+set -u
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--map-current-user|--pid|--fork|--kill-child=SIGKILL|--mount-proc) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = /bin/sh ] && [ "${2:-}" = -c ] \
+   && [ "${3:-}" = '[ "$$" -eq 1 ]' ]; then
+  exit 0
+fi
+exec "$@"
+SH
+  chmod +x "$fb/unshare"
   fm_fake_exit0 "$fb" agy jq
 }
 

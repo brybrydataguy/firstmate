@@ -29,6 +29,42 @@ fm_task_process_scope_token_valid() {
   esac
 }
 
+fm_task_process_enclosure_validate() {
+  local enclosure=$1
+  case "$enclosure" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -x "$enclosure" ] || return 1
+  "$enclosure" --user --map-current-user --pid --fork \
+    --kill-child=SIGKILL --mount-proc -- /bin/sh -c '[ "$$" -eq 1 ]' \
+    >/dev/null 2>&1
+}
+
+fm_task_process_enclosure_resolve() {
+  local enclosure enclosure_dir enclosure_name
+  enclosure=$(command -v unshare 2>/dev/null) || {
+    echo "error: verified worker process scopes require the util-linux unshare executable" >&2
+    return 1
+  }
+  case "$enclosure" in
+    /*) ;;
+    *)
+      echo "error: verified worker process scopes require an absolute unshare executable path" >&2
+      return 1
+      ;;
+  esac
+  enclosure_dir=${enclosure%/*}
+  enclosure_name=${enclosure##*/}
+  enclosure_dir=$(cd "$enclosure_dir" 2>/dev/null && pwd -P) || return 1
+  enclosure=$enclosure_dir/$enclosure_name
+  fm_task_process_enclosure_validate "$enclosure" || {
+    echo "error: this host cannot create the user and PID namespace required for verified worker process containment" >&2
+    return 1
+  }
+  printf '%s\n' "$enclosure"
+}
+
 fm_task_process_identity() {
   local pid=$1 proc_root=${FM_TASK_PROCESS_PROC_ROOT:-/proc} stat_line value starttime
   local -a stat_fields
@@ -70,19 +106,42 @@ fm_task_process_scope_record_value() {
 }
 
 fm_task_process_scope_record_read() {
-  local state=$1 id=$2 expected_token=$3 path version status token leader_pid leader_identity
+  local state=$1 id=$2 expected_token=$3 path record line key value
+  local version= status= token= leader_pid= leader_identity=
   local anchor_pid anchor_identity agent_pid agent_identity pgid identity_value legacy=0
   path=$(fm_task_process_scope_path "$state" "$id") || return 1
   if [ ! -f "$path" ] || [ -L "$path" ]; then
     echo "error: task $id has no trustworthy process-scope record at $path" >&2
     return 1
   fi
-  version=$(fm_task_process_scope_record_value "$path" version)
-  status=$(fm_task_process_scope_record_value "$path" status)
-  token=$(fm_task_process_scope_record_value "$path" token)
-  leader_pid=$(fm_task_process_scope_record_value "$path" leader_pid)
-  leader_identity=$(fm_task_process_scope_record_value "$path" leader_identity)
-  pgid=$(fm_task_process_scope_record_value "$path" pgid)
+  record=$(cat "$path" 2>/dev/null) || {
+    echo "error: task $id has no readable process-scope record at $path" >&2
+    return 1
+  }
+  anchor_pid=
+  anchor_identity=
+  agent_pid=
+  agent_identity=
+  pgid=
+  while IFS= read -r line; do
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      version) version=$value ;;
+      status) status=$value ;;
+      token) token=$value ;;
+      leader_pid) leader_pid=$value ;;
+      leader_identity) leader_identity=$value ;;
+      anchor_pid) anchor_pid=$value ;;
+      anchor_identity) anchor_identity=$value ;;
+      agent_pid) agent_pid=$value ;;
+      agent_identity) agent_identity=$value ;;
+      pgid) pgid=$value ;;
+    esac
+  done <<EOF
+$record
+EOF
   case "$version" in 1|2) ;; *) version= ;; esac
   if [ -z "$version" ] || ! fm_task_process_scope_token_valid "$token" \
      || [ "$token" != "$expected_token" ]; then
@@ -118,10 +177,7 @@ fm_task_process_scope_record_read() {
     agent_identity=$leader_identity
     legacy=1
   else
-    anchor_pid=$(fm_task_process_scope_record_value "$path" anchor_pid)
-    anchor_identity=$(fm_task_process_scope_record_value "$path" anchor_identity)
-    agent_pid=$(fm_task_process_scope_record_value "$path" agent_pid)
-    agent_identity=$(fm_task_process_scope_record_value "$path" agent_identity)
+    :
   fi
   case "$anchor_pid" in
     ''|*[!0-9]*)
