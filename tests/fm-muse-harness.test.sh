@@ -418,7 +418,7 @@ test_spawn_refuses_secondmate() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" META_API_KEY=test-key \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$raw_id" 'muse-bin-0.1.0 --yolo' --secondmate 2>&1)
+    "$SPAWN" "$raw_id" 'muse-bin-0.1.0 --yolo' --raw-harness muse --secondmate 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "raw muse command was accepted as a secondmate harness"
   assert_contains "$out" "muse is a verified crewmate/scout adapter only" \
@@ -429,7 +429,8 @@ test_spawn_refuses_secondmate() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" META_API_KEY=test-key \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$unrelated_id" 'muse-binary --yolo' --secondmate 2>&1)
+    "$SPAWN" "$unrelated_id" 'muse-binary --yolo' \
+      --raw-harness muse-binary --secondmate 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "unregistered raw secondmate unexpectedly spawned"
   assert_contains "$out" "no firstmate home supplied or registered" \

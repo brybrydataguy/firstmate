@@ -557,15 +557,20 @@ SH
 }
 
 test_agy_refuses_secondmate() {
-  local case_dir home fakebin id out raw_id raw_out
+  local case_dir home fakebin id out raw_id raw_out wrapped_id wrapped_out missing_id missing_out
   case_dir="$TMP_ROOT/secondmate"
   home="$case_dir/home"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id=agy-secondmate-x1
   raw_id=agy-raw-secondmate-x1
-  mkdir -p "$home/data/$id" "$home/data/$raw_id" "$home/projects" "$home/state" "$home/config"
+  wrapped_id=agy-wrapped-secondmate-x1
+  missing_id=agy-missing-identity-secondmate-x1
+  mkdir -p "$home/data/$id" "$home/data/$raw_id" "$home/data/$wrapped_id" \
+    "$home/data/$missing_id" "$home/projects" "$home/state" "$home/config"
   printf 'charter\n' > "$home/data/$id/brief.md"
   printf 'charter\n' > "$home/data/$raw_id/brief.md"
+  printf 'charter\n' > "$home/data/$wrapped_id/brief.md"
+  printf 'charter\n' > "$home/data/$missing_id/brief.md"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -578,10 +583,31 @@ test_agy_refuses_secondmate() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' PATH="$fakebin:$PATH" \
-    "$SPAWN" "$raw_id" 'agy-cli --dangerously-skip-permissions' --secondmate 2>&1)
+    "$SPAWN" "$raw_id" 'agy-cli --dangerously-skip-permissions' \
+      --raw-harness agy --secondmate 2>&1)
   expect_code 1 $? "raw agy command should be refused for secondmate work"
   assert_contains "$raw_out" "agy is a verified crewmate/scout adapter only" \
     "raw agy command bypassed the secondmate capability boundary: $raw_out"
+
+  wrapped_out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' PATH="$fakebin:$PATH" \
+    "$SPAWN" "$wrapped_id" 'env -u CLAUDECODE agy-cli --dangerously-skip-permissions' \
+      --raw-harness agy --secondmate 2>&1)
+  expect_code 1 $? "wrapped agy command should be refused for secondmate work"
+  assert_contains "$wrapped_out" "agy is a verified crewmate/scout adapter only" \
+    "explicit raw agy identity did not enforce the secondmate capability boundary: $wrapped_out"
+
+  missing_out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' PATH="$fakebin:$PATH" \
+    "$SPAWN" "$missing_id" 'env -u CLAUDECODE agy-cli --dangerously-skip-permissions' \
+      --secondmate 2>&1)
+  expect_code 1 $? "wrapped raw secondmate command without an identity should be refused"
+  assert_contains "$missing_out" "requires --raw-harness <adapter-identity>" \
+    "wrapped raw command bypassed explicit secondmate identity validation: $missing_out"
   pass "fm-spawn: agy is restricted to crewmate and scout work"
 }
 

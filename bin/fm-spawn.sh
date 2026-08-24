@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--raw-harness <identity>] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--raw-harness <identity>] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--raw-harness <identity>] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -34,6 +34,9 @@
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
+#   --raw-harness <identity> declares the adapter identity of a raw launch
+#   command. It is required for raw secondmate launches and optional for raw
+#   worker launches; it does not change the command being launched.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -141,7 +144,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--raw-harness/--model/--effort/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -271,6 +274,7 @@ fm_refuse_if_gate_agent
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
+RAW_HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
@@ -278,6 +282,7 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 HARNESS_SET=0
+RAW_HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
@@ -294,6 +299,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
+      raw-harness) RAW_HARNESS_ARG=$a; RAW_HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
@@ -311,6 +317,8 @@ for a in "$@"; do
     --relaunch) RELAUNCH=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
+    --raw-harness) want_value=raw-harness ;;
+    --raw-harness=*) RAW_HARNESS_ARG=${a#--raw-harness=}; RAW_HARNESS_SET=1 ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
@@ -328,6 +336,14 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
+if [ "$RAW_HARNESS_SET" -eq 1 ]; then
+  case "$RAW_HARNESS_ARG" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._+-]*)
+      echo "error: --raw-harness requires a single adapter identity using letters, digits, '.', '_', '+', or '-'" >&2
+      exit 1
+      ;;
+  esac
+fi
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
@@ -956,6 +972,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
+  [ -z "$RAW_HARNESS_ARG" ] || shared_args+=(--raw-harness "$RAW_HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
@@ -1299,13 +1316,22 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    if [ "$RAW_HARNESS_SET" -eq 1 ]; then
+      HARNESS=$RAW_HARNESS_ARG
+    elif [ "$KIND" = secondmate ]; then
+      echo "error: a raw secondmate launch requires --raw-harness <adapter-identity> so task-kind capability checks do not guess through shell wrappers" >&2
+      exit 1
+    else
+      HARNESS=""
+      for word in $LAUNCH; do
+        case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      done
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1334,6 +1360,11 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$RAW_HARNESS_SET" -eq 1 ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  echo "error: --raw-harness applies only to a raw launch command" >&2
+  exit 1
+fi
 
 TASK_PROCESS_SCOPE_FAMILY=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
 if [ -n "$TASK_PROCESS_SCOPE_FAMILY" ] \
