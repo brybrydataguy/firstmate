@@ -552,7 +552,7 @@ It is not verified for secondmate or primary work.
 | Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn. `Stop` with `fullyIdle: true` closes it immediately. `Stop` with `fullyIdle: false` records `unknown` because the official project hook surface provides no later background-completion event; malformed payloads also record `unknown`. A later `PreInvocation` or fully idle `Stop` supersedes that containment state. |
 | Delivery busy token | `esc to cancel`, the live footer present only while a turn is running. |
 | Exit command | `/exit` or `/quit` or `Ctrl+D` (exits cleanly with status 0). |
-| Interrupt | Single Escape or `Ctrl+C` cancels active turn and returns to composer. |
+| Interrupt | Single Escape or `Ctrl+C` cancels active turn and returns to composer; Firstmate uses `Ctrl+C` so interrupt delivery works on every supported backend, including Orca. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; skills in `.agents/skills/` are discovered. Typing `/` opens the interactive autocomplete menu, and typing the full skill name with Enter submits and activates the skill directly. |
 | Autonomy | `--dangerously-skip-permissions` auto-approves all tool permission requests without prompting once project trust is established. |
 | Trust dialog | Interactive launches (`-i`) in untrusted workspaces display a project trust dialog (`Do you trust the contents of this project?`) with `Yes, I trust this folder` as default. Firstmate peek handles this with `fm-send.sh <window> --key Enter`. Trust persists per canonical path in `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces`. |

@@ -205,6 +205,7 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+DESCENDANT_TASK_WORKTREE_IDENTITIES=()
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -1755,6 +1756,22 @@ EOF
   return 1
 }
 
+reap_task_worktree_processes_strict() {  # <label> <dir>...
+  local label=$1 dir has_root=0
+  shift
+  for dir in "$@"; do
+    [ -n "$dir" ] && [ -d "$dir" ] || continue
+    has_root=1
+    break
+  done
+  [ "$has_root" -eq 1 ] || return 0
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "REFUSED: cannot prove every leaked $label process for $ID is stopped because lsof is unavailable; preserving the worktree/tasktmp for manual inspection or retry." >&2
+    return 1
+  fi
+  reap_task_worktree_processes "$label" "$@"
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
@@ -2186,6 +2203,7 @@ collect_descendant_task_locks() {
     DESCENDANT_TASK_IDS+=("$child_id")
     DESCENDANT_TASK_KINDS+=("$child_kind")
     DESCENDANT_TASK_HOMES+=("$child_home")
+    DESCENDANT_TASK_WORKTREE_IDENTITIES+=("")
     [ "$child_kind" != secondmate ] \
       || collect_descendant_task_locks "$child_home" \
       || return 1
@@ -2198,6 +2216,7 @@ preflight_descendant_task_locks() {
   DESCENDANT_TASK_IDS=()
   DESCENDANT_TASK_KINDS=()
   DESCENDANT_TASK_HOMES=()
+  DESCENDANT_TASK_WORKTREE_IDENTITIES=()
   collect_descendant_task_locks "$home" || return 1
   # Acquisition order, which every other holder of these locks must match so
   # they cannot cycle: each home's task-set lock first (parent home before child
@@ -2247,8 +2266,38 @@ preflight_descendant_task_locks() {
   done
 }
 
+descendant_task_index() {  # <state> <task-id>
+  local state=$1 task_id=$2 i
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    if [ "${DESCENDANT_TASK_STATES[$i]}" = "$state" ] \
+       && [ "${DESCENDANT_TASK_IDS[$i]}" = "$task_id" ]; then
+      printf '%s\n' "$i"
+      return 0
+    fi
+  done
+  echo "error: descendant task $task_id is outside the locked teardown set" >&2
+  return 1
+}
+
+descendant_task_worktree_identity_record() {  # <state> <task-id> <identity>
+  local state=$1 task_id=$2 identity=$3 index
+  index=$(descendant_task_index "$state" "$task_id") || return 1
+  DESCENDANT_TASK_WORKTREE_IDENTITIES[$index]=$identity
+}
+
+descendant_task_worktree_identity_require() {  # <state> <task-id>
+  local state=$1 task_id=$2 index identity
+  index=$(descendant_task_index "$state" "$task_id") || return 1
+  identity=${DESCENDANT_TASK_WORKTREE_IDENTITIES[$index]:-}
+  if [ -z "$identity" ]; then
+    echo "error: descendant agy task $task_id has no retained worktree identity" >&2
+    return 1
+  fi
+  printf '%s\n' "$identity"
+}
+
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_harness child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_harness child_family child_identity child_orca_worktree_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2257,7 +2306,13 @@ validate_firstmate_home_children_removal() {
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_harness=$(meta_value "$child_meta" harness)
-    fm_control_harness_worktree_preflight "$child_harness" "$child_wt" || return 1
+    child_family=$(fm_control_harness_family "$child_harness" 2>/dev/null || true)
+    if [ "$child_family" = agy ]; then
+      child_identity=$(descendant_task_worktree_identity_require "$sub_state" "$child_id") || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+    else
+      fm_control_harness_worktree_preflight "$child_harness" "$child_wt" || return 1
+    fi
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -2477,7 +2532,7 @@ teardown_quiesce_endpoint() {  # <backend> <target> <tab-id> <label> <home> <tas
 
 quiesce_firstmate_home_agy_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_kind child_home child_harness child_family
-  local child_backend child_target child_wt child_identity
+  local child_backend child_target child_wt child_task_tmp child_identity
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2493,6 +2548,7 @@ quiesce_firstmate_home_agy_children() {  # <home>
     child_wt=$(meta_value "$child_meta" worktree)
     if [ "$child_family" = agy ] && [ "$child_kind" != secondmate ]; then
       child_identity=$(fm_control_harness_worktree_identity agy "$child_wt") || return 1
+      descendant_task_worktree_identity_record "$sub_state" "$child_id" "$child_identity" || return 1
       [ -n "$child_target" ] || {
         echo "error: agy child $child_id has no endpoint to quiesce; preserving its worktree and durable identity" >&2
         return 1
@@ -2500,6 +2556,14 @@ quiesce_firstmate_home_agy_children() {  # <home>
       teardown_quiesce_endpoint \
         "$child_backend" "$child_target" "$(meta_value "$child_meta" zellij_tab_id)" \
         "fm-$child_id" "$home" "$child_id" || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+      child_task_tmp=$(meta_value "$child_meta" tasktmp)
+      (
+        ID=$child_id
+        BACKEND=$child_backend
+        T=$child_target
+        reap_task_worktree_processes_strict "child worktree" "$child_wt" "$child_task_tmp"
+      ) || return 1
       fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
     fi
     if [ "$child_kind" = secondmate ]; then
@@ -2529,23 +2593,17 @@ cleanup_firstmate_home_children() {
     else
       child_t=$(fm_backend_target_of_meta "$child_meta")
     fi
+    if [ "$child_harness_family" = agy ]; then
+      child_worktree_identity=$(descendant_task_worktree_identity_require "$sub_state" "$child_id") || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_worktree_identity" || return 1
+    fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
-    if [ "$child_harness_family" = agy ]; then
-      child_worktree_identity=$(fm_control_harness_worktree_identity agy "$child_wt") || return 1
-      [ -n "$child_t" ] || {
-        echo "error: agy child $child_id has no endpoint to quiesce; preserving its worktree and durable identity" >&2
-        return 1
-      }
-      teardown_quiesce_endpoint \
-        "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" \
-        "fm-$child_id" "$home" "$child_id" || return 1
-      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_worktree_identity" || return 1
-    elif [ -n "$child_t" ]; then
+    if [ "$child_harness_family" != agy ] && [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
         if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
@@ -2565,6 +2623,9 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    [ "$child_harness_family" != agy ] \
+      || fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_worktree_identity" \
+      || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2762,6 +2823,7 @@ if [ "$BACKEND" = herdr ] \
 fi
 
 TEARDOWN_ENDPOINT_QUIESCED=0
+TEARDOWN_WORKTREE_PROCESSES_REAPED=0
 AGY_WORKTREE_IDENTITY=
 if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
   AGY_WORKTREE_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
@@ -2780,7 +2842,10 @@ if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
       "fm-$ID" "$FM_HOME" "$ID" || exit 1
   fi
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
+  reap_task_worktree_processes_strict worktree "$WT" "$TASK_TMP" || exit 1
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
   TEARDOWN_ENDPOINT_QUIESCED=1
+  TEARDOWN_WORKTREE_PROCESSES_REAPED=1
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
@@ -2816,7 +2881,8 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  [ "$TEARDOWN_WORKTREE_PROCESSES_REAPED" = 1 ] \
+    || reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
 if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then

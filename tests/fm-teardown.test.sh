@@ -1448,6 +1448,45 @@ test_agy_teardown_refuses_unknown_endpoint_presence() {
   pass "agy teardown requires confirmed endpoint absence"
 }
 
+test_agy_teardown_reaps_before_worktree_safety() {
+  local case_dir pid rc
+  case_dir=$(make_case agy-reap-before-safety)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "agy-reap-before-safety: setup sleeper did not start"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -C $FM_EXPECT_REAP_WT "*)
+    if [ -n "${FM_EXPECT_REAP_PID:-}" ] && kill -0 "$FM_EXPECT_REAP_PID" 2>/dev/null; then
+      printf '%s\n' "git-before-reap" >> "$FM_EXPECT_REAP_LOG"
+    fi
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  rc=0
+  FM_EXPECT_REAP_PID="$pid" FM_EXPECT_REAP_WT="$case_dir/wt" \
+  FM_EXPECT_REAP_LOG="$case_dir/order.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "agy-reap-before-safety: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "agy-reap-before-safety: leaked process survived teardown"
+  fi
+  assert_absent "$case_dir/order.log" \
+    "agy-reap-before-safety: git inspected the worktree before task processes were reaped"
+  pass "agy teardown reaps task processes before worktree safety inspection"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1806,6 +1845,87 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
       "mode=local-only"
     : > "$home/state/$child.status"
   done
+}
+
+test_forced_secondmate_reaps_agy_child_processes() {
+  local case_dir home child_wt pid rc
+  case_dir=$(make_case descendant-agy-reap)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  child_wt="$case_dir/child-a-wt"
+  printf 'harness=agy\n' >> "$home/state/child-a.meta"
+  ( cd "$child_wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "descendant-agy-reap: setup sleeper did not start"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" $FM_EXPECT_CHILD_WT "*)
+    if kill -0 "$FM_EXPECT_REAP_PID" 2>/dev/null; then
+      printf '%s\n' "return-before-reap" >> "$FM_EXPECT_REAP_LOG"
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_EXPECT_CHILD_WT="$child_wt" FM_EXPECT_REAP_PID="$pid" \
+  FM_EXPECT_REAP_LOG="$case_dir/order.log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "descendant-agy-reap: forced teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "descendant-agy-reap: agy child process survived forced teardown"
+  fi
+  assert_absent "$case_dir/order.log" \
+    "descendant-agy-reap: child worktree return ran before its processes were reaped"
+  pass "forced secondmate teardown reaps agy child processes"
+}
+
+test_forced_secondmate_retains_agy_child_identity() {
+  local case_dir home child_wt foreign_wt proof rc
+  case_dir=$(make_case descendant-agy-identity)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  child_wt="$case_dir/child-a-wt"
+  foreign_wt="$case_dir/foreign-wt"
+  printf 'harness=agy\n' >> "$home/state/child-a.meta"
+  git -C "$case_dir/project" worktree add -q -b fm/foreign "$foreign_wt" main
+  proof="$foreign_wt/.claude/settings.local.json"
+  mkdir -p "${proof%/*}" "$home/state/procevent" "$home/bin"
+  printf 'foreign hook\n' > "$proof"
+  : > "$home/state/procevent/swap.source"
+  cat > "$home/bin/fm-procevent.sh" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$case_dir/swap-complete" ]; then
+  mv -- "$child_wt" "$child_wt-original"
+  mv -- "$foreign_wt" "$child_wt"
+  : > "$case_dir/swap-complete"
+fi
+exit 0
+SH
+  chmod +x "$home/bin/fm-procevent.sh"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "descendant-agy-identity: replacement worktree should refuse"
+  assert_grep "worktree identity changed" "$case_dir/stderr" \
+    "descendant-agy-identity: cleanup did not retain the pre-quiescence identity"
+  [ "$(cat "$child_wt/.claude/settings.local.json")" = "foreign hook" ] \
+    || fail "descendant-agy-identity: cleanup mutated the replacement worktree"
+  assert_present "$home/state/child-a.meta" \
+    "descendant-agy-identity: cleanup removed child metadata after refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "descendant-agy-identity: cleanup removed parent metadata after refusing"
+  pass "forced secondmate teardown retains agy child worktree identities"
 }
 
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
@@ -2726,12 +2846,15 @@ test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_agy_teardown_rejects_replaced_worktree_before_mutation
 test_agy_teardown_revalidates_worktree_after_endpoint_quiescence
 test_agy_teardown_refuses_unknown_endpoint_presence
+test_agy_teardown_reaps_before_worktree_safety
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
+test_forced_secondmate_reaps_agy_child_processes
+test_forced_secondmate_retains_agy_child_identity
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

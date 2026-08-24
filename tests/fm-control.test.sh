@@ -52,7 +52,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
-    agy) printf '/exit\tEscape\t1\t\n' ;;
+    agy) printf '/exit\tC-c\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -461,6 +461,37 @@ test_orca_refuses_an_escape_harness_interrupt() {
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
   assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
   pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+}
+
+test_orca_delivers_agy_interrupt() {
+  local dir out rc
+  dir=$(new_case orca-agy-interrupt)
+  add_task "$dir" t1 agy ship orca "term-1"
+  {
+    cat "$dir/home/state/t1.meta"
+    echo "terminal=term-1"
+    echo "orca_worktree_id=wt-1"
+  } > "$dir/home/state/t1.meta.new"
+  sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_DIR/orca-log"
+case "${1:-} ${2:-}" in
+  "terminal read") printf '%s\n' '{"ok":true,"result":{"text":">"}}' ;;
+  "terminal send") printf '%s\n' '{"ok":true,"result":{}}' ;;
+  *) printf '%s\n' '{"ok":true,"result":{}}' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/orca"
+  : > "$dir/fake/orca-log"
+
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an agy interrupt on Orca should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/orca-log")" "terminal send --terminal term-1 --interrupt --json" \
+    "agy interrupt did not use Orca's supported interrupt primitive"
+  assert_contains "$out" "cancel=unconfirmed" \
+    "agy interrupt should report delivery without inventing an acknowledgement"
+  pass "fm-control interrupt: agy uses Orca's verified Ctrl+C primitive"
 }
 
 test_unverified_state_backends_refuse_stop_verbs() {
@@ -947,6 +978,7 @@ test_agy_wiring_contract
 test_agy_wiring_cleanup_does_not_follow_symlinks
 test_agy_wiring_cleanup_rejects_symlinked_worktree
 test_orca_refuses_an_escape_harness_interrupt
+test_orca_delivers_agy_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
 test_window_label_is_refused_with_the_exact_id

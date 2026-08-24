@@ -108,12 +108,13 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   return 0
 }
 
-# The key that cancels a running turn. Escape for every adapter except grok,
-# whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
+# The key that cancels a running turn. Agy uses its verified Ctrl+C path so
+# every supported backend, including Orca, can deliver it. Grok also uses
+# Ctrl+C because its Esc only moves focus to the scrollback.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|kimi|cursor|muse|agy) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    claude|codex|opencode|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;
+    grok|agy) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
