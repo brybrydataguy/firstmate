@@ -99,6 +99,14 @@ case "${1:-}" in
     [ -z "${FM_FAKE_TMUX_STATE:-}" ] || [ ! -e "$FM_FAKE_TMUX_STATE" ]
     exit $?
     ;;
+  list-windows)
+    if [ "${FM_FAKE_TMUX_LIST_ERROR:-0}" = 1 ]; then
+      echo "transient tmux inventory failure" >&2
+      exit 1
+    fi
+    [ -z "${FM_FAKE_TMUX_STATE:-}" ] || [ -e "$FM_FAKE_TMUX_STATE" ] || printf 'fm-task-x1\n'
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -1403,9 +1411,9 @@ test_agy_teardown_revalidates_worktree_after_endpoint_quiescence() {
   rc=0
   FM_FAKE_TMUX_SWAP_WT="$case_dir/wt" \
   FM_FAKE_TMUX_SWAP_TARGET="$case_dir/project" \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 1 "$rc" "agy-worktree-quiesce-race: forced teardown should refuse"
+  expect_code 1 "$rc" "agy-worktree-quiesce-race: teardown should refuse"
   assert_grep "worktree identity changed" "$case_dir/stderr" \
     "agy-worktree-quiesce-race: teardown did not revalidate after closing the endpoint"
   assert_present "$case_dir/tmux-state" \
@@ -1417,7 +1425,27 @@ test_agy_teardown_revalidates_worktree_after_endpoint_quiescence() {
     || fail "agy-worktree-quiesce-race: teardown detached the replacement checkout"
   assert_present "$case_dir/state/task-x1.meta" \
     "agy-worktree-quiesce-race: teardown removed task metadata after refusing"
-  pass "agy teardown binds worktree identity across endpoint quiescence"
+  pass "agy teardown binds worktree identity before worktree safety checks"
+}
+
+test_agy_teardown_refuses_unknown_endpoint_presence() {
+  local case_dir rc
+  case_dir=$(make_case agy-endpoint-presence-unknown)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+
+  rc=0
+  FM_FAKE_TMUX_LIST_ERROR=1 FM_TEARDOWN_ENDPOINT_CONFIRM_ATTEMPTS=0 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-endpoint-presence-unknown: teardown should fail closed"
+  assert_grep "has unknown presence after close" "$case_dir/stderr" \
+    "agy-endpoint-presence-unknown: teardown did not report the unqueryable endpoint"
+  assert_present "$case_dir/wt" \
+    "agy-endpoint-presence-unknown: teardown removed the worktree without confirmed endpoint absence"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-endpoint-presence-unknown: teardown removed task metadata without confirmed endpoint absence"
+  pass "agy teardown requires confirmed endpoint absence"
 }
 
 test_herdr_teardown_clears_escalation_marker() {
@@ -2697,6 +2725,7 @@ test_teardown_missing_busy_sidecar_completes
 test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_agy_teardown_rejects_replaced_worktree_before_mutation
 test_agy_teardown_revalidates_worktree_after_endpoint_quiescence
+test_agy_teardown_refuses_unknown_endpoint_presence
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

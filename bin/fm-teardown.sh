@@ -2416,17 +2416,24 @@ preflight_firstmate_home_herdr_children() {  # <home>
   done
 }
 
-teardown_endpoint_exists_in_home() {  # <backend> <target> <label> <home>
+teardown_endpoint_presence_in_home() {  # <backend> <target> <label> <home>
   local backend=$1 target=$2 label=$3 home=${4:-$FM_HOME}
-  if [ "$backend" = zellij ] && [ "$home" != "$FM_HOME" ]; then
-    ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_target_exists "$backend" "$target" "$label" )
-  else
-    fm_backend_target_exists "$backend" "$target" "$label"
-  fi
+  case "$backend:$home" in
+    zellij:"$FM_HOME"|cmux:"$FM_HOME")
+      fm_backend_target_presence_state "$backend" "$target" "$label"
+      ;;
+    zellij:*|cmux:*)
+      ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_target_presence_state "$backend" "$target" "$label" )
+      ;;
+    *)
+      fm_backend_target_presence_state "$backend" "$target" "$label"
+      ;;
+  esac
 }
 
 teardown_quiesce_endpoint() {  # <backend> <target> <tab-id> <label> <home> <task-id>
-  local backend=$1 target=$2 tab_id=$3 label=$4 home=${5:-$FM_HOME} task_id=$6 attempt=0
+  local backend=$1 target=$2 tab_id=$3 label=$4 home=${5:-$FM_HOME} task_id=$6
+  local attempt=0 max_attempts=${FM_TEARDOWN_ENDPOINT_CONFIRM_ATTEMPTS:-50} presence
   if [ "$backend" = herdr ]; then
     fm_backend_herdr_parse_target "$target" || return 1
     if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
@@ -2440,18 +2447,66 @@ teardown_quiesce_endpoint() {  # <backend> <target> <tab-id> <label> <home> <tas
     fi
     return 0
   fi
-  if [ "$backend" = zellij ] && [ "$home" != "$FM_HOME" ]; then
-    ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$backend" "$target" "$tab_id" "$label" ) 2>/dev/null || true
-  else
-    fm_backend_kill "$backend" "$target" "$tab_id" "$label" 2>/dev/null || true
-  fi
-  while teardown_endpoint_exists_in_home "$backend" "$target" "$label" "$home"; do
-    if [ "$attempt" -ge 50 ]; then
-      echo "error: endpoint $target for $task_id is not confirmed gone; preserving its worktree and durable identity" >&2
+  case "$max_attempts" in ''|*[!0-9]*) max_attempts=50 ;; esac
+  case "$backend:$home" in
+    zellij:"$FM_HOME"|cmux:"$FM_HOME")
+      fm_backend_kill "$backend" "$target" "$tab_id" "$label" 2>/dev/null || true
+      ;;
+    zellij:*|cmux:*)
+      ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$backend" "$target" "$tab_id" "$label" ) 2>/dev/null || true
+      ;;
+    *)
+      fm_backend_kill "$backend" "$target" "$tab_id" "$label" 2>/dev/null || true
+      ;;
+  esac
+  while :; do
+    presence=$(teardown_endpoint_presence_in_home "$backend" "$target" "$label" "$home")
+    case "$presence" in
+      missing) return 0 ;;
+      present|unknown) ;;
+      *) presence=unknown ;;
+    esac
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      echo "error: endpoint $target for $task_id has $presence presence after close; preserving its worktree and durable identity" >&2
       return 1
     fi
     sleep 0.1
     attempt=$((attempt + 1))
+  done
+}
+
+quiesce_firstmate_home_agy_children() {  # <home>
+  local home=$1 sub_state child_meta child_id child_kind child_home child_harness child_family
+  local child_backend child_target child_wt child_identity
+  sub_state="$home/state"
+  [ -d "$sub_state" ] || return 0
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+    child_backend=$FM_BACKEND_VALIDATED_BACKEND
+    child_target=$FM_BACKEND_VALIDATED_TARGET
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    child_harness=$(meta_value "$child_meta" harness)
+    child_family=$(fm_control_harness_family "$child_harness" 2>/dev/null || true)
+    child_wt=$(meta_value "$child_meta" worktree)
+    if [ "$child_family" = agy ] && [ "$child_kind" != secondmate ]; then
+      child_identity=$(fm_control_harness_worktree_identity agy "$child_wt") || return 1
+      [ -n "$child_target" ] || {
+        echo "error: agy child $child_id has no endpoint to quiesce; preserving its worktree and durable identity" >&2
+        return 1
+      }
+      teardown_quiesce_endpoint \
+        "$child_backend" "$child_target" "$(meta_value "$child_meta" zellij_tab_id)" \
+        "fm-$child_id" "$home" "$child_id" || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+    fi
+    if [ "$child_kind" = secondmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      quiesce_firstmate_home_agy_children "$child_home" || return 1
+    fi
   done
 }
 
@@ -2593,13 +2648,13 @@ if [ "$KIND" = secondmate ]; then
   handoff_wake_retire_validate || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
     preflight_firstmate_home_herdr_children "$HOME_PATH" || exit 1
+    quiesce_firstmate_home_agy_children "$HOME_PATH" || exit 1
+    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
 fi
 
@@ -2676,37 +2731,6 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
-  if ! inspectable_git_worktree "$WT"; then
-    echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
-    echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
-    exit 1
-  fi
-  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
-  ORCA_PATH_MATCH_VERIFIED=1
-fi
-
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
-    :
-  else
-    safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
-    else
-      exit 1
-    fi
-  fi
-fi
-
-# A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (worktree return, pane close, record removal)
-# runs under the named-session presentation lock, acquired BEFORE anything is
-# returned or erased: a contended lock refuses here while the isolated copy,
-# every durable record, and the endpoint are all still intact for a plain
-# rerun. An unresolvable lock path (for example an unreachable server) also
-# refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
 if [ "$BACKEND" = herdr ]; then
@@ -2757,6 +2781,30 @@ if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
   fi
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
   TEARDOWN_ENDPOINT_QUIESCED=1
+fi
+
+if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+  if ! inspectable_git_worktree "$WT"; then
+    echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
+    echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
+    exit 1
+  fi
+  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
+  ORCA_PATH_MATCH_VERIFIED=1
+fi
+
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  if validate_worktree_teardown_safety; then
+    :
+  else
+    safety_rc=$?
+    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+      cleanup_stale_lock_for_safety_check "$WT" || exit 1
+      validate_worktree_teardown_safety || exit 1
+    else
+      exit 1
+    fi
+  fi
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped

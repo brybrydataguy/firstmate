@@ -549,7 +549,7 @@ It is not verified for secondmate or primary work.
 | Binary | Executable `agy` from `PATH`; verified on version 1.1.19. |
 | Launch | `agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`; positional prompts are rejected with exit code 2. |
 | Models | `gemini-3.7-flash-high` (default), `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, Claude Sonnet/Opus models. Authoritative discovery: `agy models`. |
-| Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn. `Stop` with `fullyIdle: true` closes it immediately. When `fullyIdle` is false, the synchronous Stop hook reads the conversation's SQLite task rows and waits for every running background command or subtrajectory to become terminal before closing the turn. Malformed payloads or an unreadable store allow termination but retain busy state as version-drift containment. |
+| Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn. `Stop` with `fullyIdle: true` closes it immediately. `Stop` with `fullyIdle: false` records `unknown` because the official project hook surface provides no later background-completion event; malformed payloads also record `unknown`. A later `PreInvocation` or fully idle `Stop` supersedes that containment state. |
 | Delivery busy token | `esc to cancel`, the live footer present only while a turn is running. |
 | Exit command | `/exit` or `/quit` or `Ctrl+D` (exits cleanly with status 0). |
 | Interrupt | Single Escape or `Ctrl+C` cancels active turn and returns to composer. |
@@ -570,5 +570,5 @@ Firstmate supervisors handle this dialog by sending `Enter` upon spawn peek.
 Accepted trust is saved to `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces` and persists across subsequent launches.
 Firstmate writes an isolated project plugin under `.agents/plugins/` so existing project hooks remain untouched.
 Its `PreInvocation` and `Stop` hooks are gated on workspace trust and fire normally once trust is granted.
-The lifecycle observer requires `jq` and `sqlite3`, resolves the conversation database from the hook's vendor-owned `conversationId` and `transcriptPath`, and opens that database read-only.
+The lifecycle observer requires `jq` and uses only the documented hook payload.
 Antigravity CLI 1.1.9 and newer cap consecutive `decision: continue` responses, so Firstmate does not use continuation retries as completion state.

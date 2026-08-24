@@ -109,6 +109,28 @@ test_capture_fails_on_orca_error_json() {
   pass "fm_backend_orca_capture: fails closed on Orca read error JSON"
 }
 
+test_target_presence_classifies_orca_json() {
+  local out
+  orca_case presence-present
+  printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_target_presence_state term-live' "$ROOT" )
+  [ "$out" = present ] || fail "Orca presence should confirm a readable terminal, got '$out'"
+
+  orca_case presence-missing
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_target_presence_state term-stale' "$ROOT" )
+  [ "$out" = missing ] || fail "Orca presence should confirm a stale terminal handle as missing, got '$out'"
+
+  orca_case presence-unknown
+  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_target_presence_state term-unknown' "$ROOT" )
+  [ "$out" = unknown ] || fail "Orca presence should fail closed on an unqueryable terminal, got '$out'"
+  pass "fm_backend_orca_target_presence_state: distinguishes present, missing, and unknown"
+}
+
 test_runtime_check_accepts_ready_orca_status() {
   local out
   orca_case runtime-ready
@@ -1306,6 +1328,7 @@ test_dispatcher_sources_orca_and_routes_primitives() {
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
+test_target_presence_classifies_orca_json
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
 test_send_text_submit_verifies_empty_composer_after_enter

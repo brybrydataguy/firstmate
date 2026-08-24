@@ -49,12 +49,6 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh agy
-  cat > "$fakebin/sqlite3" <<'SH'
-#!/usr/bin/env bash
-[ -n "${FM_AGY_SQLITE_STATE:-}" ] && [ -f "$FM_AGY_SQLITE_STATE" ] || exit 1
-cat "$FM_AGY_SQLITE_STATE"
-SH
-  chmod +x "$fakebin/sqlite3"
   printf "%s\n" "$fakebin"
 }
 
@@ -204,7 +198,7 @@ run_agy_hook() {
 }
 
 test_agy_semantic_busy_lifecycle() {
-  local rec case_dir home proj wt fakebin launchlog id out hooks state store conversation transcript db task_state payload updater
+  local rec case_dir home proj wt fakebin launchlog id out hooks state
   rec=$(make_spawn_case semantic-busy)
   IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
 $rec
@@ -218,28 +212,13 @@ EOF
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy fm-spawn" ] \
     || fail "agy launch turn was not seeded busy"
   rm -f "$state/$id.turn-ended"
-  store="$case_dir/agy-store"
-  conversation=conversation-1
-  transcript="$store/brain/$conversation/.system_generated/logs/transcript.jsonl"
-  db="$store/conversations/$conversation.db"
-  task_state="$case_dir/background-count"
-  mkdir -p "$(dirname "$transcript")" "$(dirname "$db")"
-  : > "$transcript"
-  : > "$db"
-  printf '1\n' > "$task_state"
-  payload=$(jq -nc --arg conversation "$conversation" --arg transcript "$transcript" \
-    '{fullyIdle:false,conversationId:$conversation,transcriptPath:$transcript}')
-  ( sleep 1; printf '0\n' > "$task_state" ) &
-  updater=$!
-  out=$(FM_AGY_SQLITE_STATE="$task_state" run_agy_hook "$hooks" Stop "$payload") \
+  out=$(run_agy_hook "$hooks" Stop '{"fullyIdle":false}') \
     || fail "agy active Stop hook failed: $out"
-  wait "$updater"
   printf '%s' "$out" | jq -e '.decision == "allow"' >/dev/null \
-    || fail "agy active Stop hook did not finish after background completion: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "agy background completion did not touch the turn-end notification"
-  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "idle agy-hook" ] \
-    || fail "agy background completion did not settle semantic state"
-  rm -f "$state/$id.turn-ended"
+    || fail "agy active Stop hook did not allow the vendor lifecycle to continue: $out"
+  assert_absent "$state/$id.turn-ended" "agy active Stop hook published an unverified turn end"
+  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "unknown agy-hook" ] \
+    || fail "agy active Stop hook did not expose unsupported background completion as unknown"
   out=$(run_agy_hook "$hooks" PreInvocation) || fail "agy PreInvocation hook failed: $out"
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy agy-hook" ] \
     || fail "agy PreInvocation hook did not reopen semantic state"
@@ -247,8 +226,8 @@ EOF
   printf '%s' "$out" | jq -e '.decision == "allow"' >/dev/null \
     || fail "agy malformed Stop hook did not terminate defensively: $out"
   assert_absent "$state/$id.turn-ended" "agy Stop hook published a turn end without fullyIdle true"
-  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy agy-hook" ] \
-    || fail "agy Stop hook cleared semantic state without fullyIdle true"
+  [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "unknown agy-hook" ] \
+    || fail "agy malformed Stop hook did not expose unreadable state as unknown"
   out=$(run_agy_hook "$hooks" Stop '{"fullyIdle":true}') || fail "agy fully-idle Stop hook failed: $out"
   [ -f "$state/$id.turn-ended" ] || fail "agy Stop hook did not touch the turn-end notification"
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "idle agy-hook" ] \
@@ -258,7 +237,7 @@ EOF
     || fail "agy PreInvocation hook did not return JSON: $out"
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy agy-hook" ] \
     || fail "agy PreInvocation hook did not open semantic state"
-  pass "fm-spawn and fm-busy-lib: agy lifecycle hooks observe background completion"
+  pass "fm-spawn and fm-busy-lib: agy hooks preserve verified lifecycle boundaries"
 }
 
 test_agy_manifest_name_accepts_dotted_task_id() {

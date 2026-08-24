@@ -1634,10 +1634,6 @@ case "$LAUNCH" in
       echo "error: jq executable not found on PATH; agy lifecycle hooks require jq" >&2
       exit 1
     }
-    AGY_SQLITE_BIN=$(command -v sqlite3) || {
-      echo "error: sqlite3 executable not found on PATH; agy lifecycle hooks require sqlite3" >&2
-      exit 1
-    }
     LAUNCH=${LAUNCH//__AGYBIN__/$(shell_quote "$AGY_BIN")}
     ;;
 esac
@@ -2647,68 +2643,19 @@ EOF
 #!/bin/sh
 agy_payload=\$(cat)
 agy_fully_idle=\$(printf '%s' "\$agy_payload" | $(shell_quote "$AGY_JQ_BIN") -r 'if (.fullyIdle | type) == "boolean" then (.fullyIdle | tostring) else "invalid" end' 2>/dev/null) || agy_fully_idle=invalid
-if [ "\$agy_fully_idle" = true ]; then
-  touch $(shell_quote "$TURNEND")
-  $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true
-  printf '%s\n' '{"decision":"allow"}'
-  exit 0
-fi
-if [ "\$agy_fully_idle" != false ]; then
-  printf '%s\n' '{"decision":"allow"}'
-  exit 0
-fi
-agy_conversation=\$(printf '%s' "\$agy_payload" | $(shell_quote "$AGY_JQ_BIN") -r 'if (.conversationId | type) == "string" then .conversationId else "" end' 2>/dev/null) || agy_conversation=
-agy_transcript=\$(printf '%s' "\$agy_payload" | $(shell_quote "$AGY_JQ_BIN") -r 'if (.transcriptPath | type) == "string" then .transcriptPath else "" end' 2>/dev/null) || agy_transcript=
-case "\$agy_conversation" in
-  ''|*[!A-Za-z0-9-]*) printf '%s\n' '{"decision":"allow"}'; exit 0 ;;
-esac
-case "\$agy_transcript" in
-  */brain/"\$agy_conversation"/*) agy_store=\${agy_transcript%%/brain/"\$agy_conversation"/*} ;;
-  *) printf '%s\n' '{"decision":"allow"}'; exit 0 ;;
-esac
-agy_db="\$agy_store/conversations/\$agy_conversation.db"
-agy_attempt=0
-while [ "\$agy_attempt" -lt 50 ] && { [ ! -f "\$agy_db" ] || [ -L "\$agy_db" ]; }; do
-  sleep 0.2
-  agy_attempt=\$((agy_attempt + 1))
-done
-if [ ! -f "\$agy_db" ] || [ -L "\$agy_db" ]; then
-  printf '%s\n' '{"decision":"allow"}'
-  exit 0
-fi
-agy_seen_active=0
-agy_unreadable=0
-agy_unseen=0
-while :; do
-  agy_running=\$($(shell_quote "$AGY_SQLITE_BIN") -readonly -cmd '.timeout 1000' "\$agy_db" 'SELECT count(*) FROM steps WHERE status = 2 AND (task_details IS NOT NULL OR has_subtrajectory != 0);' 2>/dev/null) || agy_running=invalid
-  case "\$agy_running" in
-    ''|*[!0-9]*)
-      agy_unreadable=\$((agy_unreadable + 1))
-      if [ "\$agy_unreadable" -ge 50 ]; then
-        printf '%s\n' '{"decision":"allow"}'
-        exit 0
-      fi
-      sleep 0.2
-      continue
-      ;;
-  esac
-  agy_unreadable=0
-  if [ "\$agy_running" -gt 0 ]; then
-    agy_seen_active=1
-  elif [ "\$agy_seen_active" -eq 1 ]; then
+case "\$agy_fully_idle" in
+  true)
     touch $(shell_quote "$TURNEND")
-    $busy_cmd_prefix idle $busy_suffix --event background-complete >/dev/null 2>&1 || true
-    printf '%s\n' '{"decision":"allow"}'
-    exit 0
-  else
-    agy_unseen=\$((agy_unseen + 1))
-    if [ "\$agy_unseen" -ge 50 ]; then
-      printf '%s\n' '{"decision":"allow"}'
-      exit 0
-    fi
-  fi
-  sleep 0.2
-done
+    $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true
+    ;;
+  false)
+    $busy_cmd_prefix unknown $busy_suffix --event background-active >/dev/null 2>&1 || true
+    ;;
+  *)
+    $busy_cmd_prefix unknown $busy_suffix --event stop-unreadable >/dev/null 2>&1 || true
+    ;;
+esac
+printf '%s\n' '{"decision":"allow"}'
 EOF
       ); then
         echo "error: refusing to replace an existing agy lifecycle observer: $AGY_PLUGIN_DIR/fm-stop.sh" >&2
@@ -2727,7 +2674,7 @@ EOF
         exit 1
       fi
       if ! (set -o noclobber; cat > "$AGY_PLUGIN_DIR/hooks.json" <<EOF
-{"fm-firstmate-busy":{"PreInvocation":[{"type":"command","command":"$j_submit"}],"Stop":[{"type":"command","command":"$j_stop","timeout":2147483647}]}}
+{"fm-firstmate-busy":{"PreInvocation":[{"type":"command","command":"$j_submit"}],"Stop":[{"type":"command","command":"$j_stop"}]}}
 EOF
       ); then
         echo "error: refusing to replace existing agy lifecycle hooks: $AGY_PLUGIN_DIR/hooks.json" >&2
