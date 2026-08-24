@@ -230,6 +230,7 @@ add_task() {
     echo "version=2"
     echo "status=empty"
     echo "token=test-$id"
+    echo "containment=pid-namespace"
   } > "$home/state/$id.process-scope"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"

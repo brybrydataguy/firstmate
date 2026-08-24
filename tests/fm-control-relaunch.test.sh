@@ -181,6 +181,7 @@ add_ship_task() {
     echo "version=2"
     echo "status=empty"
     echo "token=test-$id"
+    echo "containment=pid-namespace"
   } > "$home/state/$id.process-scope"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
@@ -509,6 +510,25 @@ test_unscoped_harness_switch_to_agy_refuses_before_exit() {
   pass "fm-control relaunch: unscoped agy transitions fail before mutation"
 }
 
+test_portable_scope_harness_switch_to_agy_refuses_before_exit() {
+  local dir out rc
+  dir=$(new_case portable-agy-target rl40)
+  add_ship_task "$dir" rl40 claude
+  sed 's/^containment=pid-namespace$/containment=process-group/' \
+    "$dir/home/state/rl40.process-scope" > "$dir/home/state/rl40.process-scope.tmp"
+  mv "$dir/home/state/rl40.process-scope.tmp" "$dir/home/state/rl40.process-scope"
+  printf 'agy' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl40 relaunch --harness agy --note "switching runtime"); rc=$?
+  expect_code 1 "$rc" "a portable prior worker must not enter an agy worktree transition"
+  assert_contains "$out" "lacks PID namespace containment" \
+    "portable agy transition refusal did not name the missing containment proof"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "portable agy transition stopped the current agent before refusing"
+  [ ! -e "$dir/wt/.agents/plugins/fm-firstmate-busy-rl40" ] \
+    || fail "portable agy transition wrote plugin wiring before refusing"
+  pass "fm-control relaunch: portable agy transitions fail before mutation"
+}
+
 test_agy_relaunch_reaps_the_prior_process_scope() {
   local dir plugin out rc pid pgid attempts=0 token=test-rl37
   dir=$(new_case agy-scope rl37)
@@ -537,6 +557,7 @@ PY
     printf 'version=1\n'
     printf 'status=active\n'
     printf 'token=%s\n' "$token"
+    printf 'containment=pid-namespace\n'
     printf 'leader_pid=%s\n' "$pid"
     printf 'leader_identity=%s\n' "$(fm_task_process_identity "$pid")"
     printf 'pgid=%s\n' "$pid"
@@ -1451,6 +1472,7 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_agy_harness_switch_removes_the_plugin_directory
 test_scoped_harness_switch_to_agy
 test_unscoped_harness_switch_to_agy_refuses_before_exit
+test_portable_scope_harness_switch_to_agy_refuses_before_exit
 test_agy_relaunch_reaps_the_prior_process_scope
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness

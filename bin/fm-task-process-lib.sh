@@ -31,6 +31,7 @@ fm_task_process_scope_token_valid() {
 
 fm_task_process_enclosure_validate() {
   local enclosure=$1
+  [ "$enclosure" != - ] || return 0
   case "$enclosure" in
     /*) ;;
     *) return 1 ;;
@@ -44,14 +45,14 @@ fm_task_process_enclosure_validate() {
 fm_task_process_enclosure_resolve() {
   local enclosure enclosure_dir enclosure_name
   enclosure=$(command -v unshare 2>/dev/null) || {
-    echo "error: verified worker process scopes require the util-linux unshare executable" >&2
-    return 1
+    printf '%s\n' -
+    return 0
   }
   case "$enclosure" in
     /*) ;;
     *)
-      echo "error: verified worker process scopes require an absolute unshare executable path" >&2
-      return 1
+      printf '%s\n' -
+      return 0
       ;;
   esac
   enclosure_dir=${enclosure%/*}
@@ -59,10 +60,20 @@ fm_task_process_enclosure_resolve() {
   enclosure_dir=$(cd "$enclosure_dir" 2>/dev/null && pwd -P) || return 1
   enclosure=$enclosure_dir/$enclosure_name
   fm_task_process_enclosure_validate "$enclosure" || {
-    echo "error: this host cannot create the user and PID namespace required for verified worker process containment" >&2
-    return 1
+    printf '%s\n' -
+    return 0
   }
   printf '%s\n' "$enclosure"
+}
+
+fm_task_process_enclosure_containment() {
+  local enclosure=$1
+  if [ "$enclosure" = - ]; then
+    printf '%s\n' process-group
+    return 0
+  fi
+  fm_task_process_enclosure_validate "$enclosure" || return 1
+  printf '%s\n' pid-namespace
 }
 
 fm_task_process_identity() {
@@ -107,7 +118,7 @@ fm_task_process_scope_record_value() {
 
 fm_task_process_scope_record_read() {
   local state=$1 id=$2 expected_token=$3 path record line key value
-  local version= status= token= leader_pid= leader_identity=
+  local version= status= token= containment= leader_pid= leader_identity=
   local anchor_pid anchor_identity agent_pid agent_identity pgid identity_value legacy=0
   path=$(fm_task_process_scope_path "$state" "$id") || return 1
   if [ ! -f "$path" ] || [ -L "$path" ]; then
@@ -131,6 +142,7 @@ fm_task_process_scope_record_read() {
       version) version=$value ;;
       status) status=$value ;;
       token) token=$value ;;
+      containment) containment=$value ;;
       leader_pid) leader_pid=$value ;;
       leader_identity) leader_identity=$value ;;
       anchor_pid) anchor_pid=$value ;;
@@ -148,11 +160,20 @@ EOF
     echo "error: task $id has a stale or malformed process-scope record at $path" >&2
     return 1
   fi
+  case "$containment" in
+    pid-namespace|process-group|unknown) ;;
+    '') containment=unknown ;;
+    *)
+      echo "error: task $id has a malformed process-scope record at $path" >&2
+      return 1
+      ;;
+  esac
   case "$status" in
     empty)
       FM_TASK_PROCESS_SCOPE_STATUS=empty
       FM_TASK_PROCESS_SCOPE_VERSION=$version
       FM_TASK_PROCESS_SCOPE_TOKEN=$token
+      FM_TASK_PROCESS_SCOPE_CONTAINMENT=$containment
       FM_TASK_PROCESS_SCOPE_PATH=$path
       FM_TASK_PROCESS_SCOPE_LEGACY=0
       FM_TASK_PROCESS_SCOPE_ANCHOR_PID=
@@ -233,6 +254,7 @@ EOF
   FM_TASK_PROCESS_SCOPE_STATUS=active
   FM_TASK_PROCESS_SCOPE_VERSION=$version
   FM_TASK_PROCESS_SCOPE_TOKEN=$token
+  FM_TASK_PROCESS_SCOPE_CONTAINMENT=$containment
   FM_TASK_PROCESS_SCOPE_PATH=$path
   FM_TASK_PROCESS_SCOPE_LEGACY=$legacy
   FM_TASK_PROCESS_SCOPE_ANCHOR_PID=$anchor_pid
@@ -328,12 +350,14 @@ EOF
 }
 
 fm_task_process_scope_mark_empty() {
-  local path=$1 token=$2 tmp
+  local path=$1 token=$2 containment=$3 tmp
+  case "$containment" in pid-namespace|process-group|unknown) ;; *) return 1 ;; esac
   tmp=$(umask 077; mktemp "${path%/*}/.${path##*/}.XXXXXX") || return 1
   if {
       printf 'version=2\n'
       printf 'status=empty\n'
       printf 'token=%s\n' "$token"
+      printf 'containment=%s\n' "$containment"
     } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$path"; then
     return 0
   fi
@@ -342,8 +366,9 @@ fm_task_process_scope_mark_empty() {
 }
 
 fm_task_process_scope_create_empty() {
-  local state=$1 id=$2 token=$3 path tmp
+  local state=$1 id=$2 token=$3 containment=$4 path tmp
   fm_task_process_scope_token_valid "$token" || return 1
+  case "$containment" in pid-namespace|process-group) ;; *) return 1 ;; esac
   path=$(fm_task_process_scope_path "$state" "$id") || return 1
   [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
   tmp=$(umask 077; mktemp "${path%/*}/.${path##*/}.XXXXXX") || return 1
@@ -351,6 +376,7 @@ fm_task_process_scope_create_empty() {
       printf 'version=2\n'
       printf 'status=empty\n'
       printf 'token=%s\n' "$token"
+      printf 'containment=%s\n' "$containment"
     } > "$tmp" && chmod 0600 "$tmp" && ln "$tmp" "$path"; then
     rm -f -- "$tmp"
     return 0
@@ -420,7 +446,8 @@ fm_task_process_scope_quiesce() {
         fm_task_process_scope_wait_empty "$state" "$id" "$expected_token"
         return $?
       fi
-      fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN" || {
+      fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN" \
+        "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" || {
         echo "error: could not publish the empty process scope for task $id" >&2
         return 1
       }
@@ -477,7 +504,17 @@ EOF
     fm_task_process_scope_wait_empty "$state" "$id" "$expected_token"
     return $?
   fi
-  fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN"
+  fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN" \
+    "$FM_TASK_PROCESS_SCOPE_CONTAINMENT"
+}
+
+fm_task_process_scope_require_pid_namespace() {
+  local state=$1 id=$2 expected_token=$3 purpose=${4:-lifecycle transition}
+  fm_task_process_scope_record_read "$state" "$id" "$expected_token" || return 1
+  [ "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" = pid-namespace ] || {
+    echo "error: task $id cannot perform $purpose because its worker process scope lacks PID namespace containment on this host" >&2
+    return 1
+  }
 }
 
 fm_task_process_scope_wait_empty() {

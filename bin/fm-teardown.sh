@@ -678,6 +678,11 @@ WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 HARNESS=$(fm_meta_get "$META" harness)
 HARNESS_FAMILY=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
+if [ "$HARNESS_FAMILY" = agy ]; then
+  AGY_SCOPE_TOKEN=$(fm_task_process_scope_meta_token "$META") || exit 1
+  fm_task_process_scope_require_pid_namespace \
+    "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy worktree teardown" || exit 1
+fi
 fm_control_harness_worktree_preflight "$HARNESS_FAMILY" "$WT" || exit 1
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
@@ -2553,6 +2558,8 @@ quiesce_firstmate_home_scoped_children() {  # <home>
       child_scope_token=$(fm_task_process_scope_meta_token "$child_meta") || return 1
     fi
     if [ "$child_family" = agy ] && [ "$child_kind" != secondmate ]; then
+      fm_task_process_scope_require_pid_namespace \
+        "$sub_state" "$child_id" "$child_scope_token" "agy worktree teardown" || return 1
       child_identity=$(fm_control_harness_worktree_identity agy "$child_wt") || return 1
       descendant_task_worktree_identity_record "$sub_state" "$child_id" "$child_identity" || return 1
       fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "agy child" || return 1
@@ -2837,7 +2844,6 @@ TEARDOWN_WORKTREE_PROCESSES_REAPED=0
 AGY_WORKTREE_IDENTITY=
 if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
   AGY_WORKTREE_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
-  AGY_SCOPE_TOKEN=$(fm_task_process_scope_meta_token "$META") || exit 1
   fm_task_process_scope_quiesce "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy" || exit 1
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
   if [ "$BACKEND" = herdr ] && [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then

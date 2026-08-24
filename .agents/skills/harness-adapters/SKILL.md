@@ -547,7 +547,7 @@ It is not verified for secondmate or primary work.
 | Fact | Value |
 |---|---|
 | Binary | Executable `agy` from `PATH`; verified on version 1.1.19. |
-| Process enclosure | Worker launches require Linux user and PID namespaces through util-linux `unshare`; unsupported hosts refuse before endpoint allocation. |
+| Process enclosure | Linux launches use user and PID namespaces through util-linux `unshare` when the host supports them, while macOS and other hosts retain the portable process-group scope so fresh workers, including Orca-backed agy workers, can launch; relaunch and teardown paths that would mutate an agy worktree fail closed without PID namespace containment. |
 | Launch | `agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`; positional prompts are rejected with exit code 2. |
 | Models | `gemini-3.7-flash-high` (default), `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, Claude Sonnet/Opus models. Authoritative discovery: `agy models`. |
 | Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn. `Stop` with `fullyIdle: true` closes it immediately. `Stop` with `fullyIdle: false` records `unknown` because the official project hook surface provides no later background-completion event; malformed payloads also record `unknown`. A later `PreInvocation` or fully idle `Stop` supersedes that containment state. |
@@ -572,5 +572,6 @@ Accepted trust is saved to `~/.gemini/antigravity-cli/settings.json` under `trus
 Firstmate writes an isolated project plugin under `.agents/plugins/` so existing project hooks remain untouched.
 Its `PreInvocation` and `Stop` hooks are gated on workspace trust and fire normally once trust is granted.
 The lifecycle observer requires `jq` and uses only the documented hook payload.
-Firstmate launches every verified worker adapter inside a durable task process scope backed by a Linux PID namespace and proves that scope empty before an agy transition changes wiring or teardown touches the worktree.
+Firstmate launches every verified worker adapter inside a durable task process scope and records whether the host supplied PID namespace containment or portable process-group tracking.
+An agy transition may change plugin wiring or remove its worktree only when the recorded scope has PID namespace containment; hosts without it can launch a fresh agy worker but must stop it and preserve its worktree instead of relaunching or tearing it down automatically.
 Antigravity CLI 1.1.9 and newer cap consecutive `decision: continue` responses, so Firstmate does not use continuation retries as completion state.

@@ -862,16 +862,19 @@ do_relaunch() {
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
-  if [ "$TARGET_HARNESS" = agy ]; then
+  if [ "$HARNESS" = agy ] || [ "$TARGET_HARNESS" = agy ]; then
     relaunch_scope_token=$(fm_task_process_scope_meta_token_explicit "$META") \
       || die "task $ID has malformed worker process-scope ownership metadata"
     if [ -z "$relaunch_scope_token" ] && [ "$HARNESS" = agy ]; then
       relaunch_scope_token=$(fm_task_process_scope_meta_token "$META" 2>/dev/null || true)
     fi
     [ -n "$relaunch_scope_token" ] \
-      || die "task $ID predates durable worker process scopes, so relaunching it onto agy cannot prove detached prior work is stopped; start a fresh agy worker instead"
+      || die "task $ID predates durable worker process scopes, so a relaunch involving agy cannot prove detached prior work is stopped; stop it and start a fresh worker instead"
     fm_task_process_scope_record_read "$STATE" "$ID" "$relaunch_scope_token" \
-      || die "task $ID has no trustworthy worker process scope, so relaunching it onto agy is refused before the current agent is stopped"
+      || die "task $ID has no trustworthy worker process scope, so its agy relaunch transition is refused before the current agent is stopped"
+    fm_task_process_scope_require_pid_namespace \
+      "$STATE" "$ID" "$relaunch_scope_token" "an agy relaunch transition" \
+      || die "task $ID cannot be relaunched through agy on this host; stop it and start a fresh worker instead"
   fi
 
   case "$KIND" in

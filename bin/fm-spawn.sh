@@ -679,6 +679,7 @@ TASK_PROCESS_SCOPE_ENABLED=0
 TASK_SCOPE_PRIOR_TOKEN=
 TASK_SCOPE_TOKEN=
 TASK_SCOPE_ENCLOSURE=
+TASK_SCOPE_CONTAINMENT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -1660,6 +1661,7 @@ if [ "$TASK_PROCESS_SCOPE_ENABLED" = 1 ]; then
     exit 1
   }
   TASK_SCOPE_ENCLOSURE=$(fm_task_process_enclosure_resolve) || exit 1
+  TASK_SCOPE_CONTAINMENT=$(fm_task_process_enclosure_containment "$TASK_SCOPE_ENCLOSURE") || exit 1
   TASK_SCOPE_PATH=$(fm_task_process_scope_path "$STATE" "$ID") || exit 1
   if [ "$RELAUNCH" -eq 0 ] && { [ -e "$TASK_SCOPE_PATH" ] || [ -L "$TASK_SCOPE_PATH" ]; }; then
     echo "error: refusing worker spawn because a prior process-scope record still exists: $TASK_SCOPE_PATH" >&2
@@ -2504,6 +2506,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   if [ -n "$RELAUNCH_SCOPE_TOKEN" ]; then
     if [ "$RELAUNCH_PRIOR_FAMILY" = agy ] || [ "$HARNESS" = agy ]; then
+      fm_task_process_scope_require_pid_namespace \
+        "$STATE_REAL" "$ID" "$RELAUNCH_SCOPE_TOKEN" "an agy relaunch transition" || exit 1
       RELAUNCH_WT_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
     else
       RELAUNCH_WT_IDENTITY=
@@ -3068,7 +3072,8 @@ fi
 if [ "$TASK_PROCESS_SCOPE_ENABLED" = 1 ]; then
   TASK_SCOPE_PATH=$(fm_task_process_scope_path "$STATE_REAL" "$ID") || exit 1
   if [ -z "$TASK_SCOPE_PRIOR_TOKEN" ]; then
-    fm_task_process_scope_create_empty "$STATE_REAL" "$ID" "$TASK_SCOPE_TOKEN" || {
+    fm_task_process_scope_create_empty \
+      "$STATE_REAL" "$ID" "$TASK_SCOPE_TOKEN" "$TASK_SCOPE_CONTAINMENT" || {
       echo "error: could not establish the empty worker process scope for task $ID" >&2
       exit 1
     }

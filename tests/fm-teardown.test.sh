@@ -1357,6 +1357,7 @@ mark_agy_scope_empty() {
     printf 'version=1\n'
     printf 'status=empty\n'
     printf 'token=%s\n' "$token"
+    printf 'containment=pid-namespace\n'
   } > "$state/$id.process-scope"
 }
 
@@ -1384,10 +1385,34 @@ PY
     printf 'version=1\n'
     printf 'status=active\n'
     printf 'token=%s\n' "$token"
+    printf 'containment=pid-namespace\n'
     printf 'leader_pid=%s\n' "$AGY_SCOPE_PID"
     printf 'leader_identity=%s\n' "$(fm_task_process_identity "$AGY_SCOPE_PID")"
     printf 'pgid=%s\n' "$AGY_SCOPE_PID"
   } > "$state/$id.process-scope"
+}
+
+test_agy_portable_scope_teardown_refuses_before_worktree_access() {
+  local case_dir rc
+  case_dir=$(make_case agy-portable-scope)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  sed 's/^containment=pid-namespace$/containment=process-group/' \
+    "$case_dir/state/task-x1.process-scope" > "$case_dir/state/task-x1.process-scope.tmp"
+  mv "$case_dir/state/task-x1.process-scope.tmp" "$case_dir/state/task-x1.process-scope"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-portable-scope: teardown should fail closed"
+  assert_grep "lacks PID namespace containment" "$case_dir/stderr" \
+    "agy-portable-scope: teardown did not name the missing containment proof"
+  assert_present "$case_dir/wt" \
+    "agy-portable-scope: teardown removed the worktree without strict containment"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-portable-scope: teardown removed task metadata without strict containment"
+  pass "agy teardown preserves portable process-group worktrees"
 }
 
 test_agy_teardown_does_not_follow_replaced_plugin_symlink() {
@@ -2896,6 +2921,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_agy_portable_scope_teardown_refuses_before_worktree_access
 test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_agy_teardown_rejects_replaced_worktree_before_mutation
 test_agy_teardown_revalidates_worktree_after_endpoint_quiescence

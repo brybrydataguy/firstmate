@@ -152,6 +152,8 @@ EOF
   assert_contains "$(cat "$meta_file")" "process_scope_token=" "meta file did not retain the agy task process scope"
   assert_contains "$(cat "$home/state/$id.process-scope")" "status=empty" \
     "agy spawn did not prepare a recoverable process scope before launch"
+  assert_contains "$(cat "$home/state/$id.process-scope")" "containment=pid-namespace" \
+    "agy spawn did not retain its available PID namespace containment"
   pass "fm-spawn: agy defaults to gemini-3.7-flash-high and uses --prompt-interactive"
 }
 
@@ -250,14 +252,13 @@ PY
 }
 
 test_agy_process_scope_wait_survives_signals() {
-  local case_dir state record token leader attempt=0 fakebin agent agent_identity
+  local case_dir state record token leader attempt=0 agent agent_identity
   case_dir="$TMP_ROOT/process-scope-signal"
   state="$case_dir/state"
   record="$state/task-x2.process-scope"
   token=scope-launch-x2
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$state"
-  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" "$fakebin/unshare" <<'PY' &
+  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" - <<'PY' &
 import os
 import sys
 
@@ -276,6 +277,10 @@ PY
   [ "${FM_TASK_PROCESS_SCOPE_STATUS:-}" = active ] || {
     kill -KILL "$leader" 2>/dev/null || true
     fail "agy process-scope signal fixture did not publish an active scope"
+  }
+  [ "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" = process-group ] || {
+    kill -KILL "$leader" 2>/dev/null || true
+    fail "agy portable process-scope fixture did not record process-group containment"
   }
   agent=$FM_TASK_PROCESS_SCOPE_AGENT_PID
   agent_identity=$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY
@@ -529,7 +534,7 @@ EOF
   pass "fm-spawn: missing agy refuses before endpoint creation"
 }
 
-test_agy_missing_process_enclosure_refuses_before_endpoint_creation() {
+test_agy_missing_process_enclosure_uses_portable_scope() {
   local rec case_dir home proj wt fakebin launchlog id out rc
   rec=$(make_spawn_case missing-enclosure)
   IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
@@ -541,12 +546,14 @@ exit 1
 SH
   chmod +x "$fakebin/unshare"
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id"); rc=$?
-  expect_code 1 "$rc" "agy should refuse a host without PID namespace containment"
-  assert_contains "$out" "cannot create the user and PID namespace" \
-    "agy process-enclosure refusal did not explain the containment requirement: $out"
-  [ ! -s "$launchlog.endpoints" ] \
-    || fail "agy allocated an endpoint before refusing its missing process enclosure"
-  pass "fm-spawn: agy refuses unsupported process enclosure before allocation"
+  expect_code 0 "$rc" "agy should launch with portable process tracking when PID namespaces are unavailable"
+  assert_contains "$out" "spawned $id harness=agy" \
+    "agy portable process scope did not preserve the worker launch: $out"
+  [ -s "$launchlog.endpoints" ] \
+    || fail "agy portable process scope did not allocate its endpoint"
+  assert_contains "$(cat "$home/state/$id.process-scope")" "containment=process-group" \
+    "agy portable process scope did not record its containment limit"
+  pass "fm-spawn: agy preserves portable worker launches without PID namespaces"
 }
 
 test_agy_refuses_secondmate() {
@@ -635,7 +642,7 @@ test_agy_manifest_name_accepts_dotted_task_id
 test_agy_plugin_collisions_are_refused
 test_agy_post_allocation_failure_preserves_recovery_metadata
 test_agy_missing_binary_refuses_before_endpoint_creation
-test_agy_missing_process_enclosure_refuses_before_endpoint_creation
+test_agy_missing_process_enclosure_uses_portable_scope
 test_agy_refuses_secondmate
 test_agy_busy_matching_and_liveness
 test_agy_crew_dispatch_validation

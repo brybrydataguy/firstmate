@@ -10,6 +10,7 @@ token=$2
 prior_token=$3
 launch=$4
 enclosure=$5
+containment=$(fm_task_process_enclosure_containment "$enclosure") || exit 1
 state=${record%/*}
 name=${record##*/}
 id=${name%.process-scope}
@@ -40,8 +41,11 @@ scope_agent() {
     if fm_task_process_scope_record_read "$state" "$id" "$token" 2>/dev/null \
        && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
        && [ "$FM_TASK_PROCESS_SCOPE_AGENT_PID" = "$agent_pid" ]; then
-      exec "$enclosure" --user --map-current-user --pid --fork \
-        --kill-child=SIGKILL --mount-proc -- /bin/sh -c "$launch"
+      if [ "$containment" = pid-namespace ]; then
+        exec "$enclosure" --user --map-current-user --pid --fork \
+          --kill-child=SIGKILL --mount-proc -- /bin/sh -c "$launch"
+      fi
+      exec /bin/sh -c "$launch"
     fi
     sleep 0.01
     attempt=$((attempt + 1))
@@ -75,6 +79,7 @@ trap scope_launch_cleanup EXIT
   printf 'version=2\n'
   printf 'status=active\n'
   printf 'token=%s\n' "$token"
+  printf 'containment=%s\n' "$containment"
   printf 'anchor_pid=%s\n' "$pid"
   printf 'anchor_identity=%s\n' "$anchor_identity"
   printf 'agent_pid=%s\n' "$agent_pid"
@@ -95,7 +100,7 @@ done
 while :; do
   snapshot=$(fm_task_process_scope_snapshot "$token" "$pgid" 1 "$pid" 1) || exit 1
   if [ -z "$snapshot" ]; then
-    fm_task_process_scope_mark_empty "$record" "$token" || exit 1
+    fm_task_process_scope_mark_empty "$record" "$token" "$containment" || exit 1
     exit "$launch_status"
   fi
   sleep 0.05
