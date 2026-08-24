@@ -549,7 +549,7 @@ It is not verified for secondmate or primary work.
 | Binary | Executable `agy` from `PATH`; verified on version 1.1.19. |
 | Launch | `agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`; positional prompts are rejected with exit code 2. |
 | Models | `gemini-3.7-flash-high` (default), `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, Claude Sonnet/Opus models. Authoritative discovery: `agy models`. |
-| Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn and closes it only when a `Stop` payload reports `fullyIdle: true`; false or malformed payloads leave the task busy. |
+| Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn; `Stop` with `fullyIdle: false` keeps the execution loop running, `fullyIdle: true` closes the turn, and malformed payloads allow termination but retain busy state as version-drift containment. |
 | Delivery busy token | `esc to cancel`, the live footer present only while a turn is running. |
 | Exit command | `/exit` or `/quit` or `Ctrl+D` (exits cleanly with status 0). |
 | Interrupt | Single Escape or `Ctrl+C` cancels active turn and returns to composer. |

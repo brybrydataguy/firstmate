@@ -210,12 +210,14 @@ EOF
     || fail "agy launch turn was not seeded busy"
   rm -f "$state/$id.turn-ended"
   out=$(run_agy_hook "$hooks" Stop '{"fullyIdle":false}') || fail "agy active Stop hook failed: $out"
-  printf '%s' "$out" | jq -e '.decision == "allow"' >/dev/null \
-    || fail "agy Stop hook did not return its required JSON contract: $out"
+  printf '%s' "$out" | jq -e '.decision == "continue" and (.reason | length > 0)' >/dev/null \
+    || fail "agy active Stop hook did not keep the execution loop running: $out"
   assert_absent "$state/$id.turn-ended" "agy Stop hook published a turn end while background work remained active"
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy fm-spawn" ] \
     || fail "agy Stop hook cleared semantic state while fullyIdle was false"
   out=$(run_agy_hook "$hooks" Stop '{}') || fail "agy malformed Stop hook failed: $out"
+  printf '%s' "$out" | jq -e '.decision == "allow"' >/dev/null \
+    || fail "agy malformed Stop hook did not terminate defensively: $out"
   assert_absent "$state/$id.turn-ended" "agy Stop hook published a turn end without fullyIdle true"
   [ "$(fm_busy_classify tmux fake:w agy "$id" "$state")" = "busy fm-spawn" ] \
     || fail "agy Stop hook cleared semantic state without fullyIdle true"
@@ -261,7 +263,9 @@ EOF
   assert_contains "$out" "plugin path already exists" "agy collision refusal was not actionable: $out"
   [ "$(cat "$plugin/plugin.json")" = project-owned ] || fail "agy spawn overwrote a project-owned plugin manifest"
   assert_absent "$plugin/hooks.json" "agy spawn wrote hooks into a project-owned plugin directory"
-  assert_absent "$home/state/$id.meta" "agy plugin collision published task metadata"
+  assert_present "$home/state/$id.meta" "agy plugin collision did not preserve recovery metadata"
+  assert_contains "$(cat "$home/state/$id.meta")" "worktree=$wt" "agy recovery metadata omitted the allocated worktree"
+  assert_contains "$(cat "$home/state/$id.meta")" "harness=unknown" "agy collision recovery metadata claimed ownership of the colliding plugin"
 
   rec=$(make_spawn_case plugin-symlink)
   IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
@@ -279,6 +283,7 @@ EOF
   [ "$(cat "$wt/agy-plugin-target/sentinel")" = target-owned ] || fail "agy spawn changed the symlink target"
   assert_absent "$wt/agy-plugin-target/plugin.json" "agy spawn followed the plugin symlink for its manifest"
   assert_absent "$wt/agy-plugin-target/hooks.json" "agy spawn followed the plugin symlink for its hooks"
+  assert_present "$home/state/$id.meta" "agy plugin symlink refusal did not preserve recovery metadata"
   pass "fm-spawn: agy plugin installation refuses collisions and symlinks"
 }
 

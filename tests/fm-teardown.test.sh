@@ -1326,6 +1326,31 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_agy_teardown_does_not_follow_replaced_plugin_symlink() {
+  local case_dir plugin target rc
+  case_dir=$(make_case agy-plugin-symlink)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  plugin="$case_dir/wt/.agents/plugins/fm-firstmate-busy-task-x1"
+  target="$case_dir/plugin-target"
+  mkdir -p "${plugin%/*}" "$target"
+  printf 'target manifest\n' > "$target/plugin.json"
+  printf 'target hooks\n' > "$target/hooks.json"
+  ln -s "$target" "$plugin"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "agy-plugin-symlink: forced teardown should complete safely"
+  [ ! -e "$plugin" ] && [ ! -L "$plugin" ] \
+    || fail "agy-plugin-symlink: teardown did not unlink the replaced plugin directory"
+  [ "$(cat "$target/plugin.json")" = "target manifest" ] \
+    || fail "agy-plugin-symlink: teardown followed the symlink to the target manifest"
+  [ "$(cat "$target/hooks.json")" = "target hooks" ] \
+    || fail "agy-plugin-symlink: teardown followed the symlink to the target hooks"
+  pass "agy teardown unlinks a replaced plugin directory without traversal"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2600,6 +2625,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

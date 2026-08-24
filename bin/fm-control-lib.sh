@@ -241,6 +241,41 @@ fm_control_harness_wiring_dirs() {  # <harness> <worktree> <state-dir> <id>
   esac
 }
 
+fm_control_harness_wiring_cleanup() {  # <harness> <worktree> <state-dir> <id>
+  local harness=${1-} wt=${2-} state=${3-} id=${4-} dir parent path
+  [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
+  harness=$(fm_control_harness_family "$harness") || return 0
+  if [ "$harness" = agy ]; then
+    dir=$(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id") || return 1
+    for parent in "$wt/.agents" "$wt/.agents/plugins"; do
+      if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then
+        echo "error: refusing agy wiring cleanup through an unsafe plugin parent: $parent" >&2
+        return 1
+      fi
+    done
+    if [ -L "$dir" ]; then
+      rm -f -- "$dir"
+      return
+    fi
+    if [ -e "$dir" ] && [ ! -d "$dir" ]; then
+      echo "error: refusing agy wiring cleanup through a non-directory plugin path: $dir" >&2
+      return 1
+    fi
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -f -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+EOF
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rmdir -- "$path" 2>/dev/null || [ ! -e "$path" ] || return 1
+  done <<EOF
+$(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id")
+EOF
+}
+
 # The firstmate-owned global turn-end registry entry a harness mints per task.
 # grok and kimi are the two adapters whose turn-end hook is global and gated by
 # a private token file; every other adapter's wiring is fully covered by

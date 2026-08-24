@@ -400,6 +400,28 @@ test_agy_wiring_contract() {
   pass "fm-control-lib: agy lifecycle wiring has one cleanup owner"
 }
 
+test_agy_wiring_cleanup_does_not_follow_symlinks() {
+  local dir wt state plugin target
+  dir=$(new_case agy-wiring-cleanup)
+  wt="$dir/wt"
+  state="$dir/state"
+  plugin="$wt/.agents/plugins/fm-firstmate-busy-task-x1"
+  target="$dir/plugin-target"
+  mkdir -p "$wt/.agents/plugins" "$state" "$target"
+  printf 'target manifest\n' > "$target/plugin.json"
+  printf 'target hooks\n' > "$target/hooks.json"
+  ln -s "$target" "$plugin"
+  fm_control_harness_wiring_cleanup agy "$wt" "$state" task-x1 \
+    || fail "agy wiring cleanup refused its replaceable leaf symlink"
+  [ ! -e "$plugin" ] && [ ! -L "$plugin" ] \
+    || fail "agy wiring cleanup did not unlink the replaceable plugin symlink"
+  [ "$(cat "$target/plugin.json")" = "target manifest" ] \
+    || fail "agy wiring cleanup followed the symlink to the target manifest"
+  [ "$(cat "$target/hooks.json")" = "target hooks" ] \
+    || fail "agy wiring cleanup followed the symlink to the target hooks"
+  pass "fm-control-lib: agy wiring cleanup unlinks symlinks without traversal"
+}
+
 test_orca_refuses_an_escape_harness_interrupt() {
   local dir out rc
   dir=$(new_case orca-escape)
@@ -898,6 +920,7 @@ test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
 test_agy_wiring_contract
+test_agy_wiring_cleanup_does_not_follow_symlinks
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr

@@ -696,10 +696,7 @@ spawn_abort_cleanup() {
   local status=$?
   if [ "$AGY_PLUGIN_INSTALL_PENDING" = 1 ]; then
     AGY_PLUGIN_INSTALL_PENDING=0
-    if [ -d "$AGY_PLUGIN_DIR" ] && [ ! -L "$AGY_PLUGIN_DIR" ]; then
-      rm -f -- "$AGY_PLUGIN_DIR/plugin.json" "$AGY_PLUGIN_DIR/hooks.json" 2>/dev/null || true
-      rmdir -- "$AGY_PLUGIN_DIR" 2>/dev/null || true
-    fi
+    fm_control_harness_wiring_cleanup agy "$WT" "${STATE_REAL:-$STATE}" "$ID" 2>/dev/null || true
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
@@ -817,7 +814,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -835,18 +832,7 @@ clear_relaunch_harness_wiring() {
   if [ -n "$auth_path" ]; then
     rm -f -- "$auth_path" || return 1
   fi
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    rm -f -- "$path" || return 1
-  done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
-EOF
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    rmdir -- "$path" 2>/dev/null || [ ! -e "$path" ] || return 1
-  done <<EOF
-$(fm_control_harness_wiring_dirs "$harness" "$wt" "$state" "$id")
-EOF
+  fm_control_harness_wiring_cleanup "$harness" "$wt" "$state" "$id"
 }
 
 agy_plugin_prepare() {
@@ -886,6 +872,43 @@ agy_plugin_prepare() {
   }
   AGY_PLUGIN_DIR=$plugin_dir
   AGY_PLUGIN_INSTALL_PENDING=1
+}
+
+publish_spawn_recovery_meta() {
+  local meta_window=$T tmp="$STATE/.$ID.meta.recovery.${BASHPID:-$$}"
+  [ "$BACKEND" != orca ] || return 0
+  {
+    echo "window=$meta_window"
+    echo "endpoint_task_id=$ID"
+    echo "worktree=$WT"
+    echo "project=$PROJ_ABS"
+    echo "harness=unknown"
+    echo "kind=$KIND"
+    [ -z "$MODE" ] || echo "mode=$MODE"
+    [ -z "$YOLO" ] || echo "yolo=$YOLO"
+    echo "tasktmp=$TASK_TMP"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=$HERDR_SES"
+      echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+      echo "herdr_tab_id=$HERDR_TAB_ID"
+      echo "herdr_pane_id=$HERDR_PANE_ID"
+    fi
+    if [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=$ZELLIJ_SES"
+      echo "zellij_tab_id=$ZELLIJ_TAB_ID"
+      echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+    fi
+    if [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
+      echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    fi
+  } > "$tmp" && mv -f -- "$tmp" "$STATE/$ID.meta" || {
+    rm -f -- "$tmp"
+    return 1
+  }
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -2448,7 +2471,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
 case "$HARNESS" in
-  agy*) agy_plugin_prepare "$WT" "$STATE_REAL" "$ID" || exit 1 ;;
+  agy*)
+    if ! agy_plugin_prepare "$WT" "$STATE_REAL" "$ID"; then
+      if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+        if publish_spawn_recovery_meta; then
+          echo "error: agy setup stopped after endpoint creation; recoverable metadata was preserved at $STATE/$ID.meta" >&2
+        else
+          echo "error: agy setup stopped after endpoint creation and recovery metadata could not be published" >&2
+        fi
+      fi
+      exit 1
+    fi
+    ;;
 esac
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
@@ -2599,7 +2633,7 @@ EOF
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '%s\\n' '{}'")
-      j_stop=$(json_escape "if $(shell_quote "$AGY_JQ_BIN") -e '.fullyIdle == true' >/dev/null 2>&1; then touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; fi; printf '%s\\n' '{\"decision\":\"allow\"}'")
+      j_stop=$(json_escape "agy_fully_idle=\$($(shell_quote "$AGY_JQ_BIN") -r 'if (.fullyIdle | type) == \"boolean\" then (.fullyIdle | tostring) else \"invalid\" end' 2>/dev/null) || agy_fully_idle=invalid; if [ \"\$agy_fully_idle\" = true ]; then touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; printf '%s\\n' '{\"decision\":\"allow\"}'; elif [ \"\$agy_fully_idle\" = false ]; then printf '%s\\n' '{\"decision\":\"continue\",\"reason\":\"Background work remains active\"}'; else printf '%s\\n' '{\"decision\":\"allow\"}'; fi")
       if ! (set -o noclobber; cat > "$AGY_PLUGIN_DIR/plugin.json" <<EOF
 {"name":"fm-firstmate-busy"}
 EOF
