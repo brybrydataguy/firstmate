@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -133,6 +133,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified 2026-08-24 on Antigravity CLI (`agy`) 1.1.19. Default model is `gemini-3.7-flash-high`. Model variants like `gemini-3.7-flash-high` already encode effort, so `--effort` is omitted by firstmate to avoid CLI conflict errors. `xhigh` and `max` are capped to `high`. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -152,6 +153,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
+| agy | Run `agy models`, which lists the models available to the authenticated account. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -173,6 +175,7 @@ Natural language is acceptable if uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
 - cursor: `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills. Its slash popup swallows the first Enter, so a genuine second Enter submits; the shared submit retry handles it.
+- agy: `/<skill>`, for example `/no-mistakes`.
 
 ## Submission acknowledgement hazards
 
@@ -534,3 +537,32 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+
+## agy (VERIFIED 2026-08-24, Antigravity CLI 1.1.19)
+
+Antigravity CLI launches from `PATH` (typically `/opt/homebrew/bin/agy`).
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `agy` from `PATH`; verified on version 1.1.19. |
+| Launch | `agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`; positional prompts are rejected with exit code 2. |
+| Models | `gemini-3.7-flash-high` (default), `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, Claude Sonnet/Opus models. Authoritative discovery: `agy models`. |
+| Busy-pane signature | `esc to cancel` on bottom left, Braille spinners `[⣾⣽⣻⢿⡿⣟⣯⣷]`, and step headers (`● Bash(...)`, `⣾ Loading...`). |
+| Exit command | `/exit` or `/quit` or `Ctrl+D` (exits cleanly with status 0). |
+| Interrupt | Single Escape or `Ctrl+C` cancels active turn and returns to composer. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`; skills in `.agents/skills/` are discovered. Typing `/` opens the interactive autocomplete menu, and typing the full skill name with Enter submits and activates the skill directly. |
+| Autonomy | `--dangerously-skip-permissions` auto-approves all tool permission requests without prompting once project trust is established. |
+| Trust dialog | Interactive launches (`-i`) in untrusted workspaces display a project trust dialog (`Do you trust the contents of this project?`) with `Yes, I trust this folder` as default. Firstmate peek handles this with `fm-send.sh <window> --key Enter`. Trust persists per canonical path in `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces`. |
+| Hooks | Natively supports `.agents/hooks.json` events including `Stop`, `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`. Project hooks are strictly gated on workspace trust. |
+| Environment markers | Child tool processes receive `ANTIGRAVITY_LS_VERSION=cli-1.1.19` and `ANTIGRAVITY_SOURCE_METADATA`. |
+| Composer | Horizontal rule borders (`───`) enclosing prompt glyph `>`. Bordered empty composer correctly classifies as `empty`. |
+| Effort | `--effort low\|medium\|high`. Firstmate omits `--effort` for variant models (e.g. `gemini-3.7-flash-high`) and caps `xhigh`/`max` to `high` for generic model names. |
+| Resumption | Resumes prior conversations via `agy --conversation <id>` or `--continue` / `-c`. |
+
+`agy` delivers the launch brief through `--prompt-interactive` (`-i`) as a single interactive turn.
+Positional arguments are rejected by `agy` with exit code 2, so `--prompt-interactive` is required.
+Tool execution is fully autonomous once `--dangerously-skip-permissions` is passed and project trust is granted.
+On first interactive launch in an untrusted directory, `agy` renders a project trust confirmation prompt.
+Firstmate supervisors handle this dialog by sending `Enter` upon spawn peek.
+Accepted trust is saved to `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces` and persists across subsequent launches.
+Project-local `.agents/hooks.json` hooks (including `Stop` and `PreToolUse`) are gated on workspace trust and fire normally once trust is granted.

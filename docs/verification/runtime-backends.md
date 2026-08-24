@@ -28,6 +28,9 @@ zsh
 ```
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
+Claude, Codex, OpenCode, and Grok were observed under their own process names.
+Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
+Antigravity CLI (`agy`) 1.1.19 was observed under `agy` on 2026-08-24.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
 ### Agent liveness name sources

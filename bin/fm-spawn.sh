@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -1061,7 +1061,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1073,8 +1073,12 @@ elif [ "$KIND" = secondmate ]; then
       fi
       ;;
     *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
+      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+        FIRSTMATE_HOME=${POS[1]}
+        ARG3=${POS[2]:-}
+      else
+        ARG3=${POS[1]}
+      fi
       ;;
   esac
 else
@@ -1191,6 +1195,10 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy (Antigravity CLI): --prompt-interactive (-i) delivers the brief to start
+    # the supervised interactive session. --dangerously-skip-permissions auto-approves
+    # tool execution without per-tool confirmation prompts.
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1295,6 +1303,12 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+if [ "$HARNESS" = agy ]; then
+  if [ "$MODEL_SET" -eq 0 ] || [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    MODEL="gemini-3.7-flash-high"
+  fi
+fi
+
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
@@ -1376,14 +1390,14 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 effort=$2 model=${3:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -1427,6 +1441,23 @@ effort_flag_for_harness() {
       case "$effort" in
         low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+      esac
+      ;;
+    agy)
+      # agy accepts --effort low|medium|high.
+      # When the selected model already encodes reasoning effort (e.g. *-low,
+      # *-medium, *-high), agy rejects a conflicting --effort flag and redundant
+      # effort flags are unnecessary, so omit --effort.
+      # For base/generic models (e.g. gemini-3.7-flash), map requested effort;
+      # cap unsupported xhigh/max to high.
+      case "$model" in
+        *-low|*-medium|*-high) ;;
+        *)
+          case "$effort" in
+            low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+            xhigh|max) printf -- '--effort %s ' "$(shell_quote "high")" ;;
+          esac
+          ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
@@ -2728,7 +2759,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
