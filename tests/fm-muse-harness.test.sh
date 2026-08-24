@@ -391,15 +391,18 @@ EOF
 # dialect rejects the model-reawakening handlers a firstmate primary needs, so a
 # secondmate on muse could never arm a supervision cycle.
 test_spawn_refuses_secondmate() {
-  local case_dir home fakebin id out raw_id status
+  local case_dir home fakebin id out raw_id unrelated_id status
   case_dir="$TMP_ROOT/secondmate"
   home="$case_dir/home"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="muse-secondmate-x1"
   raw_id="muse-raw-secondmate-x1"
-  mkdir -p "$home/data/$id" "$home/data/$raw_id" "$home/projects" "$home/state" "$home/config" "$case_dir/muse"
+  unrelated_id="muse-unrelated-secondmate-x1"
+  mkdir -p "$home/data/$id" "$home/data/$raw_id" "$home/data/$unrelated_id" \
+    "$home/projects" "$home/state" "$home/config" "$case_dir/muse"
   printf 'charter\n' > "$home/data/$id/brief.md"
   printf 'charter\n' > "$home/data/$raw_id/brief.md"
+  printf 'charter\n' > "$home/data/$unrelated_id/brief.md"
   out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -415,11 +418,24 @@ test_spawn_refuses_secondmate() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" META_API_KEY=test-key \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$raw_id" 'muse-cli --yolo' --secondmate 2>&1)
+    "$SPAWN" "$raw_id" 'muse-bin-0.1.0 --yolo' --secondmate 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "raw muse command was accepted as a secondmate harness"
   assert_contains "$out" "muse is a verified crewmate/scout adapter only" \
     "raw muse command bypassed the secondmate capability boundary"
+
+  out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" META_API_KEY=test-key \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$unrelated_id" 'muse-binary --yolo' --secondmate 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unregistered raw secondmate unexpectedly spawned"
+  assert_contains "$out" "no firstmate home supplied or registered" \
+    "unrelated raw command did not reach normal secondmate validation"
+  assert_not_contains "$out" "crewmate/scout adapter only" \
+    "unrelated raw command was claimed by the Muse adapter"
   pass "muse is refused as a secondmate harness"
 }
 

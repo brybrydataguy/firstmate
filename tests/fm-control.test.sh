@@ -325,8 +325,10 @@ test_harness_family_resolution() {
       || fail "'$recorded' should resolve to the $want adapter"
     [ "$got" = "$want" ] || fail "'$recorded' should resolve to $want, got '$got'"
   done
-  fm_control_harness_family someagent \
-    && fail "an unrecognized launch command must not be guessed into an adapter family"
+  for recorded in someagent musescore amuse notmuse-bin muse-binary muse-bind muse-cli; do
+    fm_control_harness_family "$recorded" \
+      && fail "unrecognized launch command '$recorded' must not be guessed into an adapter family"
+  done
   fm_control_harness_family '' \
     && fail "an empty harness must not resolve to an adapter family"
   # The signed adapter is a distinct launch profile, not a pi variant.

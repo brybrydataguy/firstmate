@@ -72,11 +72,11 @@ fm_control_harness_supported() {  # <harness>
 # The verified adapter a RECORDED harness value belongs to. Every table below
 # is keyed by the exact verified adapter name, but a task launched from a raw
 # command records the command's basename instead (bin/fm-spawn.sh derives
-# harness= that way), which is why the spawn adapters match `claude*`, `muse*`,
-# and friends. This is the one place that prefix rule is stated. `pi` and
-# `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
-# and an unrecognized value returns nonzero rather than being guessed into a
-# family.
+# harness= that way), which is why most spawn adapters match a command prefix.
+# Muse is exact `muse` or versioned `muse-bin-*`, matching its recorded process
+# identity. `pi` and `pi-signed` are exact because a `pi*` prefix would swallow
+# the signed adapter, and an unrecognized value returns nonzero rather than
+# being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
@@ -87,7 +87,7 @@ fm_control_harness_family() {  # <recorded-harness>
     grok*) printf 'grok' ;;
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
-    muse*) printf 'muse' ;;
+    muse|muse-bin-*) printf 'muse' ;;
     agy*) printf 'agy' ;;
     *) return 1 ;;
   esac
