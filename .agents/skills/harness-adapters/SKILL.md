@@ -571,4 +571,5 @@ Accepted trust is saved to `~/.gemini/antigravity-cli/settings.json` under `trus
 Firstmate writes an isolated project plugin under `.agents/plugins/` so existing project hooks remain untouched.
 Its `PreInvocation` and `Stop` hooks are gated on workspace trust and fire normally once trust is granted.
 The lifecycle observer requires `jq` and uses only the documented hook payload.
+Firstmate launches the adapter inside a durable task process scope and proves that scope empty before exit, relaunch wiring changes, or teardown touches the worktree.
 Antigravity CLI 1.1.9 and newer cap consecutive `decision: continue` responses, so Firstmate does not use continuation retries as completion state.

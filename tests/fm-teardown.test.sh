@@ -53,6 +53,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-task-process-lib.sh
+. "$ROOT/bin/fm-task-process-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -1347,11 +1349,53 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+mark_agy_scope_empty() {
+  local state=$1 id=$2 token
+  token="test-$id"
+  printf 'spawn_gen=%s\n' "$token" >> "$state/$id.meta"
+  {
+    printf 'version=1\n'
+    printf 'status=empty\n'
+    printf 'token=%s\n' "$token"
+  } > "$state/$id.process-scope"
+}
+
+start_agy_scoped_sleeper() {
+  local state=$1 id=$2 cwd=$3 token pgid attempts=0
+  token="test-$id"
+  printf 'spawn_gen=%s\n' "$token" >> "$state/$id.meta"
+  FM_TASK_PROCESS_SCOPE_TOKEN="$token" python3 - "$cwd" <<'PY' &
+import os
+import sys
+
+os.setpgrp()
+os.chdir(sys.argv[1])
+os.execv("/bin/sleep", ["sleep", "300"])
+PY
+  AGY_SCOPE_PID=$!
+  while [ "$attempts" -lt 50 ]; do
+    pgid=$(ps -o pgid= -p "$AGY_SCOPE_PID" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$AGY_SCOPE_PID" ] && break
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "$pgid" = "$AGY_SCOPE_PID" ] || fail "agy scope fixture did not enter its own process group"
+  {
+    printf 'version=1\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'leader_pid=%s\n' "$AGY_SCOPE_PID"
+    printf 'leader_identity=%s\n' "$(fm_task_process_identity "$AGY_SCOPE_PID")"
+    printf 'pgid=%s\n' "$AGY_SCOPE_PID"
+  } > "$state/$id.process-scope"
+}
+
 test_agy_teardown_does_not_follow_replaced_plugin_symlink() {
   local case_dir plugin target rc
   case_dir=$(make_case agy-plugin-symlink)
   write_meta "$case_dir" local-only ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
   plugin="$case_dir/wt/.agents/plugins/fm-firstmate-busy-task-x1"
   target="$case_dir/plugin-target"
   mkdir -p "${plugin%/*}" "$target"
@@ -1377,6 +1421,7 @@ test_agy_teardown_rejects_replaced_worktree_before_mutation() {
   case_dir=$(make_case agy-worktree-symlink)
   write_meta "$case_dir" local-only ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
   mv "$case_dir/wt" "$case_dir/wt-original"
   ln -s "$case_dir/project" "$case_dir/wt"
   hook="$case_dir/project/.claude/settings.local.json"
@@ -1404,6 +1449,7 @@ test_agy_teardown_revalidates_worktree_after_endpoint_quiescence() {
   case_dir=$(make_case agy-worktree-quiesce-race)
   write_meta "$case_dir" local-only ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
   hook="$case_dir/project/.claude/settings.local.json"
   mkdir -p "${hook%/*}"
   printf 'foreign hook\n' > "$hook"
@@ -1433,6 +1479,7 @@ test_agy_teardown_refuses_unknown_endpoint_presence() {
   case_dir=$(make_case agy-endpoint-presence-unknown)
   write_meta "$case_dir" local-only ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
 
   rc=0
   FM_FAKE_TMUX_LIST_ERROR=1 FM_TEARDOWN_ENDPOINT_CONFIRM_ATTEMPTS=0 \
@@ -1454,17 +1501,16 @@ test_agy_teardown_reaps_before_worktree_safety() {
   write_meta "$case_dir" no-mistakes ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
   land_shippable_commit "$case_dir"
-  ( cd "$case_dir/wt" && exec sleep 300 ) &
-  pid=$!
-  disown
-  sleep 0.3
+  start_agy_scoped_sleeper "$case_dir/state" task-x1 /tmp
+  pid=$AGY_SCOPE_PID
   kill -0 "$pid" 2>/dev/null || fail "agy-reap-before-safety: setup sleeper did not start"
   cat > "$case_dir/fakebin/git" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
   *" -C $FM_EXPECT_REAP_WT "*)
     if [ -n "${FM_EXPECT_REAP_PID:-}" ] && kill -0 "$FM_EXPECT_REAP_PID" 2>/dev/null; then
-      printf '%s\n' "git-before-reap" >> "$FM_EXPECT_REAP_LOG"
+      process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$FM_EXPECT_REAP_PID" 2>/dev/null || true)
+      case "$process_stat" in *Z*) ;; *) printf '%s\n' "git-before-reap" >> "$FM_EXPECT_REAP_LOG" ;; esac
     fi
     ;;
 esac
@@ -1477,7 +1523,11 @@ SH
   FM_EXPECT_REAP_LOG="$case_dir/order.log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
   expect_code 0 "$rc" "agy-reap-before-safety: teardown should succeed"
+  wait "$pid" 2>/dev/null || true
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "agy-reap-before-safety: leaked process survived teardown"
@@ -1855,17 +1905,16 @@ test_forced_secondmate_reaps_agy_child_processes() {
   home="$case_dir/secondmate-home"
   child_wt="$case_dir/child-a-wt"
   printf 'harness=agy\n' >> "$home/state/child-a.meta"
-  ( cd "$child_wt" && exec sleep 300 ) &
-  pid=$!
-  disown
-  sleep 0.3
+  start_agy_scoped_sleeper "$home/state" child-a /tmp
+  pid=$AGY_SCOPE_PID
   kill -0 "$pid" 2>/dev/null || fail "descendant-agy-reap: setup sleeper did not start"
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
   *" $FM_EXPECT_CHILD_WT "*)
     if kill -0 "$FM_EXPECT_REAP_PID" 2>/dev/null; then
-      printf '%s\n' "return-before-reap" >> "$FM_EXPECT_REAP_LOG"
+      process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$FM_EXPECT_REAP_PID" 2>/dev/null || true)
+      case "$process_stat" in *Z*) ;; *) printf '%s\n' "return-before-reap" >> "$FM_EXPECT_REAP_LOG" ;; esac
     fi
     ;;
 esac
@@ -1878,7 +1927,11 @@ SH
   FM_EXPECT_REAP_LOG="$case_dir/order.log" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
   expect_code 0 "$rc" "descendant-agy-reap: forced teardown should succeed"
+  wait "$pid" 2>/dev/null || true
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "descendant-agy-reap: agy child process survived forced teardown"
@@ -1897,6 +1950,7 @@ test_forced_secondmate_retains_agy_child_identity() {
   child_wt="$case_dir/child-a-wt"
   foreign_wt="$case_dir/foreign-wt"
   printf 'harness=agy\n' >> "$home/state/child-a.meta"
+  mark_agy_scope_empty "$home/state" child-a
   git -C "$case_dir/project" worktree add -q -b fm/foreign "$foreign_wt" main
   proof="$foreign_wt/.claude/settings.local.json"
   mkdir -p "${proof%/*}" "$home/state/procevent" "$home/bin"

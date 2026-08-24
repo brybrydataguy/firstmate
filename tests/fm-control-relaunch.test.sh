@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-process-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
@@ -154,7 +156,17 @@ add_ship_task() {
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
+    if [ "$harness" = agy ]; then
+      echo "spawn_gen=test-$id"
+    fi
   } > "$home/state/$id.meta"
+  if [ "$harness" = agy ]; then
+    {
+      echo "version=1"
+      echo "status=empty"
+      echo "token=test-$id"
+    } > "$home/state/$id.process-scope"
+  fi
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
@@ -444,6 +456,56 @@ test_agy_harness_switch_removes_the_plugin_directory() {
   expect_code 0 "$rc" "switching away from agy should succeed"$'\n'"$out"
   [ ! -e "$plugin" ] || fail "switching away from agy left its plugin directory behind"
   pass "fm-control relaunch: agy plugin wiring retires with its agent"
+}
+
+test_agy_relaunch_reaps_the_prior_process_scope() {
+  local dir plugin out rc pid pgid attempts=0 token=test-rl37
+  dir=$(new_case agy-scope rl37)
+  add_ship_task "$dir" rl37 agy
+  printf 'agy' > "$dir/fake/command"
+  plugin="$dir/wt/.agents/plugins/fm-firstmate-busy-rl37"
+  mkdir -p "$plugin"
+  printf '%s\n' '{"name":"fm-firstmate-busy"}' > "$plugin/plugin.json"
+  printf '%s\n' '{"fm-firstmate-busy":{}}' > "$plugin/hooks.json"
+  FM_TASK_PROCESS_SCOPE_TOKEN="$token" python3 - <<'PY' &
+import os
+
+os.setpgrp()
+os.chdir("/tmp")
+os.execv("/bin/sleep", ["sleep", "300"])
+PY
+  pid=$!
+  while [ "$attempts" -lt 50 ]; do
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$pid" ] && break
+    /bin/sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "$pgid" = "$pid" ] || fail "agy relaunch scope fixture did not enter its own process group"
+  {
+    printf 'version=1\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'leader_pid=%s\n' "$pid"
+    printf 'leader_identity=%s\n' "$(fm_task_process_identity "$pid")"
+    printf 'pgid=%s\n' "$pid"
+  } > "$dir/home/state/rl37.process-scope"
+  printf 'claude' > "$dir/fake/becomes"
+
+  out=$(run_control "$dir" rl37 relaunch --harness claude --note "switching runtime"); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  expect_code 0 "$rc" "switching away from agy should reap its process scope"$'\n'"$out"
+  wait "$pid" 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "agy relaunch left a detached task process alive"
+  fi
+  [ ! -e "$plugin" ] || fail "agy relaunch did not retire wiring after quiescence"
+  [ ! -e "$dir/home/state/rl37.process-scope" ] \
+    || fail "agy relaunch retained the retired process-scope record"
+  pass "fm-control relaunch: agy process scope is empty before wiring transition"
 }
 
 test_harness_switch_does_not_carry_the_old_profile_axes() {
@@ -1336,6 +1398,7 @@ test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_agy_harness_switch_removes_the_plugin_directory
+test_agy_relaunch_reaps_the_prior_process_scope
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

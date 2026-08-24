@@ -248,6 +248,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-task-process-lib.sh
+. "$SCRIPT_DIR/fm-task-process-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -673,6 +675,8 @@ RELAUNCH_REPLACEMENT_WT=
 AGY_PLUGIN_INSTALL_PENDING=0
 AGY_PLUGIN_DIR=
 AGY_RECOVERY_META_PENDING=0
+AGY_SCOPE_PRIOR_TOKEN=
+AGY_SCOPE_TOKEN=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -1634,6 +1638,19 @@ case "$LAUNCH" in
       echo "error: jq executable not found on PATH; agy lifecycle hooks require jq" >&2
       exit 1
     }
+    command -v ps >/dev/null 2>&1 || {
+      echo "error: ps executable not found on PATH; agy process-scope supervision requires ps" >&2
+      exit 1
+    }
+    [ -x "$SCRIPT_DIR/fm-task-process-launch.sh" ] || {
+      echo "error: agy process-scope launcher is missing or not executable: $SCRIPT_DIR/fm-task-process-launch.sh" >&2
+      exit 1
+    }
+    AGY_SCOPE_PATH=$(fm_task_process_scope_path "$STATE" "$ID") || exit 1
+    if [ "$RELAUNCH" -eq 0 ] && { [ -e "$AGY_SCOPE_PATH" ] || [ -L "$AGY_SCOPE_PATH" ]; }; then
+      echo "error: refusing agy spawn because a prior process-scope record still exists: $AGY_SCOPE_PATH" >&2
+      exit 1
+    fi
     LAUNCH=${LAUNCH//__AGYBIN__/$(shell_quote "$AGY_BIN")}
     ;;
 esac
@@ -2468,6 +2485,15 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$RELAUNCH" -eq 1 ]; then
+  RELAUNCH_PRIOR_FAMILY=$(fm_control_harness_family "$RELAUNCH_PRIOR_HARNESS" 2>/dev/null || true)
+  if [ "$RELAUNCH_PRIOR_FAMILY" = agy ]; then
+    RELAUNCH_SCOPE_TOKEN=$(fm_task_process_scope_meta_token "$RELAUNCH_META") || exit 1
+    RELAUNCH_WT_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
+    fm_task_process_scope_quiesce "$STATE_REAL" "$ID" "$RELAUNCH_SCOPE_TOKEN" "retired agy" || exit 1
+    fm_control_harness_worktree_identity_verify agy "$WT" "$RELAUNCH_WT_IDENTITY" || exit 1
+    AGY_SCOPE_PRIOR_TOKEN=$RELAUNCH_SCOPE_TOKEN
+    AGY_SCOPE_TOKEN=$RELAUNCH_SCOPE_TOKEN
+  fi
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
   # files and turn-end token registry entries behind, and even a same-harness
@@ -2859,6 +2885,9 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+if [ "$HARNESS" = agy ] && [ -z "$AGY_SCOPE_TOKEN" ]; then
+  AGY_SCOPE_TOKEN=$SPAWN_GEN
+fi
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2870,7 +2899,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen process_scope_token traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2890,6 +2919,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ "$HARNESS" != agy ] || echo "process_scope_token=$AGY_SCOPE_TOKEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2933,6 +2963,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+fi
+if [ "$RELAUNCH" -eq 1 ] && [ "${RELAUNCH_PRIOR_FAMILY:-}" = agy ] && [ "$HARNESS" != agy ]; then
+  fm_task_process_scope_remove_empty "$STATE" "$ID" "$AGY_SCOPE_PRIOR_TOKEN" || {
+    echo "error: could not retire the prior agy process-scope record for task $ID" >&2
+    exit 1
+  }
+  AGY_SCOPE_PRIOR_TOKEN=
 fi
 AGY_RECOVERY_META_PENDING=0
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
@@ -3007,6 +3044,41 @@ fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
+if [ "$HARNESS" = agy ]; then
+  AGY_SCOPE_PATH=$(fm_task_process_scope_path "$STATE_REAL" "$ID") || exit 1
+  if [ -z "$AGY_SCOPE_PRIOR_TOKEN" ]; then
+    fm_task_process_scope_create_empty "$STATE_REAL" "$ID" "$AGY_SCOPE_TOKEN" || {
+      echo "error: could not establish the empty agy process scope for task $ID" >&2
+      exit 1
+    }
+  else
+    fm_task_process_scope_record_read "$STATE_REAL" "$ID" "$AGY_SCOPE_TOKEN" || exit 1
+    [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] || {
+      echo "error: refusing agy launch because its prior process scope is not empty: $AGY_SCOPE_PATH" >&2
+      exit 1
+    }
+  fi
+  LAUNCH="$(shell_quote "$SCRIPT_DIR/fm-task-process-launch.sh") $(shell_quote "$AGY_SCOPE_PATH") $(shell_quote "$AGY_SCOPE_TOKEN") $(shell_quote "$AGY_SCOPE_TOKEN") $(shell_quote "$LAUNCH")"
+fi
+
+agy_process_scope_wait_for_start() {
+  local attempt=0 attempts=${FM_AGY_PROCESS_SCOPE_START_ATTEMPTS:-50}
+  local interval=${FM_AGY_PROCESS_SCOPE_START_INTERVAL:-0.1}
+  case "$attempts" in ''|*[!0-9]*) attempts=50 ;; esac
+  while [ "$attempt" -lt "$attempts" ]; do
+    if fm_task_process_scope_record_read "$STATE_REAL" "$ID" "$AGY_SCOPE_TOKEN" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
+       && fm_task_process_identity_matches \
+         "$FM_TASK_PROCESS_SCOPE_LEADER_PID" "$FM_TASK_PROCESS_SCOPE_LEADER_IDENTITY"; then
+      return 0
+    fi
+    sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+  [ "$attempts" -eq 0 ] && return 0
+  echo "error: agy process-scope launcher did not register a live task process for $ID" >&2
+  return 1
+}
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" tmp status=0
@@ -3056,6 +3128,9 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = agy ]; then
+  agy_process_scope_wait_for_start || exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

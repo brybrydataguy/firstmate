@@ -7,6 +7,8 @@ set -u
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-process-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 HARNESS_SH="$ROOT/bin/fm-harness.sh"
@@ -78,8 +80,13 @@ run_agy_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_AGY_PROCESS_SCOPE_START_ATTEMPTS=0 \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$launchlog.endpoints" PATH="$launch_path" \
     "$SPAWN" "$id" "$proj" agy --mode no-mistakes --yolo off "$@" 2>&1
+}
+
+agy_launch_fragment() {
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
 }
 
 test_agy_harness_detection() {
@@ -102,7 +109,7 @@ test_agy_harness_detection() {
 }
 
 test_agy_default_model_and_launch_template() {
-  local rec case_dir home proj wt fakebin launchlog id out launched meta_file
+  local rec case_dir home proj wt fakebin launchlog id out launched meta_file state_real
   rec=$(make_spawn_case default-model)
   IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
 $rec
@@ -111,16 +118,72 @@ EOF
   assert_contains "$out" "spawned $id harness=agy" "agy spawn did not report success: $out"
 
   launched=$(cat "$launchlog")
-  assert_contains "$launched" "'$fakebin/agy' --dangerously-skip-permissions --model 'gemini-3.7-flash-high' --prompt-interactive" \
+  assert_contains "$launched" "$(agy_launch_fragment "'$fakebin/agy' --dangerously-skip-permissions --model 'gemini-3.7-flash-high' --prompt-interactive")" \
     "agy launch command did not match expected template with default model: $launched"
   assert_contains "$launched" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
     "agy launch did not clear inherited Cursor markers: $launched"
   assert_contains "$launched" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
     "agy launch did not clear inherited Claude, Pi, and Grok markers: $launched"
+  assert_contains "$launched" "fm-task-process-launch.sh" \
+    "agy launch did not establish its task process scope: $launched"
+  state_real=$(cd "$home/state" && pwd -P)
+  assert_contains "$launched" "$state_real/$id.process-scope" \
+    "agy launch did not bind its process scope to task state: $launched"
 
   meta_file="$home/state/$id.meta"
   assert_contains "$(cat "$meta_file")" "model=gemini-3.7-flash-high" "meta file did not record default model: $(cat "$meta_file")"
+  assert_contains "$(cat "$meta_file")" "process_scope_token=" "meta file did not retain the agy task process scope"
+  assert_contains "$(cat "$home/state/$id.process-scope")" "status=empty" \
+    "agy spawn did not prepare a recoverable process scope before launch"
   pass "fm-spawn: agy defaults to gemini-3.7-flash-high and uses --prompt-interactive"
+}
+
+test_agy_process_scope_launcher() {
+  local case_dir state record token pid attempt=0 status
+  case_dir="$TMP_ROOT/process-scope-launcher"
+  state="$case_dir/state"
+  record="$state/task-x1.process-scope"
+  token=scope-launch-x1
+  mkdir -p "$state"
+  FM_TASK_PROCESS_SCOPE_STATUS=
+  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" <<'PY' &
+import os
+import sys
+
+os.setpgrp()
+os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", "exec /bin/sleep 5"])
+PY
+  pid=$!
+  while [ "$attempt" -lt 50 ]; do
+    if fm_task_process_scope_record_read "$state" task-x1 "$token" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ]; then
+      break
+    fi
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  status=${FM_TASK_PROCESS_SCOPE_STATUS:-}
+  if [ "$status" != active ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "agy process-scope launcher did not publish an active scope"
+  fi
+  [ "$FM_TASK_PROCESS_SCOPE_LEADER_PID" = "$pid" ] \
+    || {
+      kill -KILL "$pid" 2>/dev/null || true
+      fail "agy process-scope launcher recorded the wrong leader"
+    }
+  fm_task_process_scope_quiesce "$state" task-x1 "$token" agy \
+    || fail "agy process-scope launcher could not reap its task process"
+  wait "$pid" 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "agy process-scope launcher left its task process alive"
+  fi
+  fm_task_process_scope_record_read "$state" task-x1 "$token" \
+    || fail "agy process-scope launcher lost its durable scope record"
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] \
+    || fail "agy process-scope launcher did not publish an empty scope after reap"
+  pass "agy process-scope launcher owns detached task processes"
 }
 
 test_agy_effort_flag_handling() {
@@ -133,7 +196,7 @@ $rec
 EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --model gemini-3.7-flash-high --effort high)
   launched=$(cat "$launchlog")
-  assert_contains "$launched" "--model 'gemini-3.7-flash-high'" "launch did not include model: $launched"
+  assert_contains "$launched" "$(agy_launch_fragment "--model 'gemini-3.7-flash-high'")" "launch did not include model: $launched"
   assert_not_contains "$launched" "--effort" "launch command emitted redundant/conflicting --effort for variant model ID"
 
   # 2. Base model ID with effort: emits --effort <effort>
@@ -143,7 +206,7 @@ $rec
 EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --model gemini-3.7-flash --effort medium)
   launched=$(cat "$launchlog")
-  assert_contains "$launched" "--model 'gemini-3.7-flash' --effort 'medium'" "launch command did not include resolved effort: $launched"
+  assert_contains "$launched" "$(agy_launch_fragment "--model 'gemini-3.7-flash' --effort 'medium'")" "launch command did not include resolved effort: $launched"
 
   # 3. Base model ID with unsupported xhigh or max effort: capped to high
   rec=$(make_spawn_case capped-effort)
@@ -152,7 +215,7 @@ $rec
 EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --model gemini-3.7-flash --effort xhigh)
   launched=$(cat "$launchlog")
-  assert_contains "$launched" "--model 'gemini-3.7-flash' --effort 'high'" "launch command did not cap xhigh to high: $launched"
+  assert_contains "$launched" "$(agy_launch_fragment "--model 'gemini-3.7-flash' --effort 'high'")" "launch command did not cap xhigh to high: $launched"
 
   rec=$(make_spawn_case capped-max)
   IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
@@ -160,7 +223,7 @@ $rec
 EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --model gemini-3.7-flash --effort max)
   launched=$(cat "$launchlog")
-  assert_contains "$launched" "--model 'gemini-3.7-flash' --effort 'high'" "launch command did not cap max to high: $launched"
+  assert_contains "$launched" "$(agy_launch_fragment "--model 'gemini-3.7-flash' --effort 'high'")" "launch command did not cap max to high: $launched"
 
   rec=$(make_spawn_case implicit-low)
   IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
@@ -168,7 +231,7 @@ $rec
 EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --effort low)
   launched=$(cat "$launchlog")
-  assert_contains "$launched" "--model 'gemini-3.7-flash-low'" "explicit low effort did not select the low model variant: $launched"
+  assert_contains "$launched" "$(agy_launch_fragment "--model 'gemini-3.7-flash-low'")" "explicit low effort did not select the low model variant: $launched"
   assert_contains "$(cat "$home/state/$id.meta")" "effort=low" "meta did not retain explicit low effort"
 
   rec=$(make_spawn_case implicit-medium)
@@ -177,7 +240,7 @@ $rec
 EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$launchlog" "$id" --effort medium)
   launched=$(cat "$launchlog")
-  assert_contains "$launched" "--model 'gemini-3.7-flash-medium'" "explicit medium effort did not select the medium model variant: $launched"
+  assert_contains "$launched" "$(agy_launch_fragment "--model 'gemini-3.7-flash-medium'")" "explicit medium effort did not select the medium model variant: $launched"
 
   rec=$(make_spawn_case conflicting-effort)
   IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
@@ -412,6 +475,7 @@ test_agy_crew_dispatch_validation() {
 
 test_agy_harness_detection
 test_agy_default_model_and_launch_template
+test_agy_process_scope_launcher
 test_agy_effort_flag_handling
 test_agy_semantic_busy_lifecycle
 test_agy_manifest_name_accepts_dotted_task_id

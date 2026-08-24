@@ -130,6 +130,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-task-process-lib.sh
+. "$SCRIPT_DIR/fm-task-process-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -439,6 +441,13 @@ retire_busy_incarnation() {
   fi
 }
 
+quiesce_task_process_scope() {
+  local scope_token
+  [ "$HARNESS" = agy ] || return 0
+  scope_token=$(fm_task_process_scope_meta_token "$META") || return 1
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$scope_token" "agy"
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
@@ -447,6 +456,7 @@ do_exit() {
   state=$(agent_state)
   case "$state" in
     dead)
+      quiesce_task_process_scope || return $?
       printf 'already-stopped'
       return 0
       ;;
@@ -462,6 +472,7 @@ do_exit() {
       case "$state" in
         dead)
           retire_busy_incarnation
+          quiesce_task_process_scope || return $?
           printf 'stopped'
           return 0
           ;;
@@ -488,6 +499,7 @@ do_exit() {
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
+  quiesce_task_process_scope || return $?
   printf 'stopped'
 }
 
@@ -779,7 +791,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line relaunch_worktree_identity=
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -816,8 +828,15 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
+  if [ "$HARNESS" = agy ]; then
+    relaunch_worktree_identity=$(fm_control_harness_worktree_identity agy "$WT") \
+      || die "task $ID's agy worktree identity cannot be retained before relaunch"
+  fi
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
+  [ -z "$relaunch_worktree_identity" ] \
+    || fm_control_harness_worktree_identity_verify agy "$WT" "$relaunch_worktree_identity" \
+    || die "task $ID's worktree identity changed while its agy process scope was stopping"
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's

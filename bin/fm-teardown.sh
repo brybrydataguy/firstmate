@@ -154,6 +154,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-task-process-lib.sh
+. "$SCRIPT_DIR/fm-task-process-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -2532,7 +2534,7 @@ teardown_quiesce_endpoint() {  # <backend> <target> <tab-id> <label> <home> <tas
 
 quiesce_firstmate_home_agy_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_kind child_home child_harness child_family
-  local child_backend child_target child_wt child_task_tmp child_identity
+  local child_backend child_target child_wt child_task_tmp child_identity child_scope_token
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2556,6 +2558,9 @@ quiesce_firstmate_home_agy_children() {  # <home>
       teardown_quiesce_endpoint \
         "$child_backend" "$child_target" "$(meta_value "$child_meta" zellij_tab_id)" \
         "fm-$child_id" "$home" "$child_id" || return 1
+      fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
+      child_scope_token=$(fm_task_process_scope_meta_token "$child_meta") || return 1
+      fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "agy child" || return 1
       fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
       child_task_tmp=$(meta_value "$child_meta" tasktmp)
       (
@@ -2678,7 +2683,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
-      "$sub_state/$child_id.cursor-session"
+      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.process-scope"
   done
 }
 
@@ -2841,6 +2846,9 @@ if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
       "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" \
       "fm-$ID" "$FM_HOME" "$ID" || exit 1
   fi
+  fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
+  AGY_SCOPE_TOKEN=$(fm_task_process_scope_meta_token "$META") || exit 1
+  fm_task_process_scope_quiesce "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy" || exit 1
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
   reap_task_worktree_processes_strict worktree "$WT" "$TASK_TMP" || exit 1
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
@@ -3024,7 +3032,7 @@ status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" "$STATE/$ID.process-scope" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
