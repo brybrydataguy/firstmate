@@ -13,6 +13,43 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-task-process-lib.sh"
 
+scope_agent() {
+  [ "$#" -eq 5 ] || return 2
+  local record token containment launch enclosure state name id agent_pid attempt actual_containment
+  record=$1
+  token=$2
+  containment=$3
+  launch=$4
+  enclosure=$5
+  state=${record%/*}
+  name=${record##*/}
+  id=${name%.process-scope}
+  agent_pid=$$
+  attempt=0
+  actual_containment=$(fm_task_process_enclosure_containment "$enclosure") || return 1
+  [ "$actual_containment" = "$containment" ] || return 1
+  while [ "$attempt" -lt 200 ]; do
+    if fm_task_process_scope_record_read "$state" "$id" "$token" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
+       && [ "$FM_TASK_PROCESS_SCOPE_AGENT_PID" = "$agent_pid" ]; then
+      if [ "$containment" = pid-namespace ]; then
+        exec "$enclosure" --user --map-current-user --pid --fork \
+          --kill-child=SIGKILL --mount-proc -- /bin/sh -c "$launch"
+      fi
+      exec /bin/sh -c "$launch"
+    fi
+    sleep 0.01
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+if [ "${1:-}" = --scope-agent ]; then
+  shift
+  scope_agent "$@"
+  exit $?
+fi
+
 [ "$#" -eq 5 ] || exit 2
 record=$1
 token=$2
@@ -43,25 +80,8 @@ fm_task_process_enclosure_validate "$enclosure" || {
 }
 export FM_TASK_PROCESS_SCOPE_TOKEN=$token
 anchor_identity=$(fm_task_process_identity "$pid") || exit 1
-scope_agent() {
-  local agent_pid=${BASHPID:-} attempt=0
-  case "$agent_pid" in ''|*[!0-9]*) exit 1 ;; esac
-  while [ "$attempt" -lt 200 ]; do
-    if fm_task_process_scope_record_read "$state" "$id" "$token" 2>/dev/null \
-       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
-       && [ "$FM_TASK_PROCESS_SCOPE_AGENT_PID" = "$agent_pid" ]; then
-      if [ "$containment" = pid-namespace ]; then
-        exec "$enclosure" --user --map-current-user --pid --fork \
-          --kill-child=SIGKILL --mount-proc -- /bin/sh -c "$launch"
-      fi
-      exec /bin/sh -c "$launch"
-    fi
-    sleep 0.01
-    attempt=$((attempt + 1))
-  done
-  exit 1
-}
-scope_agent <&0 &
+"$BASH" "$SCRIPT_DIR/fm-task-process-launch.sh" --scope-agent \
+  "$record" "$token" "$containment" "$launch" "$enclosure" <&0 &
 agent_pid=$!
 agent_identity=$(fm_task_process_identity "$agent_pid") || {
   kill -KILL "$agent_pid" 2>/dev/null || true

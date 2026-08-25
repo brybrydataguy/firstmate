@@ -258,12 +258,12 @@ test_agy_process_scope_wait_survives_signals() {
   record="$state/task-x2.process-scope"
   token=scope-launch-x2
   mkdir -p "$state"
-  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" - <<'PY' &
+  python3 - /bin/bash "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" - <<'PY' &
 import os
 import sys
 
 os.setpgrp()
-os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], "-", "sleep 30", sys.argv[4]])
+os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], "-", "sleep 30", sys.argv[5]])
 PY
   leader=$!
   while [ "$attempt" -lt 100 ]; do
@@ -295,7 +295,7 @@ PY
   fm_task_process_scope_quiesce "$state" task-x2 "$token" agy \
     || fail "agy process-scope signal fixture could not quiesce"
   wait "$leader" 2>/dev/null || true
-  pass "agy process-scope launcher survives interrupted waits"
+  pass "agy process-scope launcher survives stock Bash and interrupted waits"
 }
 
 test_agy_relaunch_sources_receive_process_scopes() {

@@ -1415,6 +1415,49 @@ test_agy_portable_scope_teardown_refuses_before_worktree_access() {
   pass "agy teardown preserves portable process-group worktrees"
 }
 
+test_agy_teardown_refuses_unsafe_work_before_quiescence() {
+  local case_dir rc
+  case_dir=$(make_case agy-unsafe-work-preflight)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  printf 'uncommitted work\n' > "$case_dir/wt/dirty.txt"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-unsafe-work-preflight: teardown should refuse"
+  assert_grep "uncommitted changes" "$case_dir/stderr" \
+    "agy-unsafe-work-preflight: teardown did not report the unsafe work"
+  assert_absent "$case_dir/tmux-state" \
+    "agy-unsafe-work-preflight: teardown closed the endpoint before refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-unsafe-work-preflight: teardown removed task metadata after refusing"
+  pass "agy teardown preserves workers when worktree safety refuses"
+}
+
+test_agy_teardown_refuses_missing_lsof_before_quiescence() {
+  local case_dir path_without_lsof rc
+  case_dir=$(make_case agy-missing-lsof-preflight)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-missing-lsof-preflight: teardown should refuse"
+  assert_grep "lsof is unavailable" "$case_dir/stderr" \
+    "agy-missing-lsof-preflight: teardown did not report the missing proof tool"
+  assert_absent "$case_dir/tmux-state" \
+    "agy-missing-lsof-preflight: teardown closed the endpoint before refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-missing-lsof-preflight: teardown removed task metadata after refusing"
+  pass "agy teardown preserves workers when strict process proof is unavailable"
+}
+
 test_agy_teardown_does_not_follow_replaced_plugin_symlink() {
   local case_dir plugin target rc
   case_dir=$(make_case agy-plugin-symlink)
@@ -1520,22 +1563,27 @@ test_agy_teardown_refuses_unknown_endpoint_presence() {
   pass "agy teardown requires confirmed endpoint absence"
 }
 
-test_agy_teardown_reaps_before_worktree_safety() {
+test_agy_teardown_checks_worktree_safety_before_and_after_reap() {
   local case_dir pid rc
-  case_dir=$(make_case agy-reap-before-safety)
+  case_dir=$(make_case agy-safety-around-reap)
   write_meta "$case_dir" no-mistakes ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
   land_shippable_commit "$case_dir"
   start_agy_scoped_sleeper "$case_dir/state" task-x1 /tmp
   pid=$AGY_SCOPE_PID
-  kill -0 "$pid" 2>/dev/null || fail "agy-reap-before-safety: setup sleeper did not start"
+  kill -0 "$pid" 2>/dev/null || fail "agy-safety-around-reap: setup sleeper did not start"
   cat > "$case_dir/fakebin/git" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *" -C $FM_EXPECT_REAP_WT "*)
+  *" -C $FM_EXPECT_REAP_WT status --porcelain "*)
     if [ -n "${FM_EXPECT_REAP_PID:-}" ] && kill -0 "$FM_EXPECT_REAP_PID" 2>/dev/null; then
       process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$FM_EXPECT_REAP_PID" 2>/dev/null || true)
-      case "$process_stat" in *Z*) ;; *) printf '%s\n' "git-before-reap" >> "$FM_EXPECT_REAP_LOG" ;; esac
+      case "$process_stat" in
+        *Z*) printf '%s\n' "safety-after-reap" >> "$FM_EXPECT_REAP_LOG" ;;
+        *) printf '%s\n' "safety-before-reap" >> "$FM_EXPECT_REAP_LOG" ;;
+      esac
+    else
+      printf '%s\n' "safety-after-reap" >> "$FM_EXPECT_REAP_LOG"
     fi
     ;;
 esac
@@ -1551,15 +1599,17 @@ SH
   if [ "$rc" -ne 0 ]; then
     kill -KILL "$pid" 2>/dev/null || true
   fi
-  expect_code 0 "$rc" "agy-reap-before-safety: teardown should succeed"
+  expect_code 0 "$rc" "agy-safety-around-reap: teardown should succeed"
   wait "$pid" 2>/dev/null || true
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
-    fail "agy-reap-before-safety: leaked process survived teardown"
+    fail "agy-safety-around-reap: leaked process survived teardown"
   fi
-  assert_absent "$case_dir/order.log" \
-    "agy-reap-before-safety: git inspected the worktree before task processes were reaped"
-  pass "agy teardown reaps task processes before worktree safety inspection"
+  assert_grep "safety-before-reap" "$case_dir/order.log" \
+    "agy-safety-around-reap: teardown omitted the worker-preserving safety preflight"
+  assert_grep "safety-after-reap" "$case_dir/order.log" \
+    "agy-safety-around-reap: teardown omitted the authoritative safety recheck"
+  pass "agy teardown checks worktree safety around process quiescence"
 }
 
 test_herdr_teardown_clears_escalation_marker() {
@@ -2922,11 +2972,13 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_agy_portable_scope_teardown_refuses_before_worktree_access
+test_agy_teardown_refuses_unsafe_work_before_quiescence
+test_agy_teardown_refuses_missing_lsof_before_quiescence
 test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_agy_teardown_rejects_replaced_worktree_before_mutation
 test_agy_teardown_revalidates_worktree_after_endpoint_quiescence
 test_agy_teardown_refuses_unknown_endpoint_presence
-test_agy_teardown_reaps_before_worktree_safety
+test_agy_teardown_checks_worktree_safety_before_and_after_reap
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
