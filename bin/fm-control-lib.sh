@@ -74,9 +74,9 @@ fm_control_harness_supported() {  # <harness>
 # command records the command's basename instead (bin/fm-spawn.sh derives
 # harness= that way), which is why most spawn adapters match a command prefix.
 # Muse is exact `muse` or versioned `muse-bin-*`, matching its recorded process
-# identity. `pi` and `pi-signed` are exact because a `pi*` prefix would swallow
-# the signed adapter, and an unrecognized value returns nonzero rather than
-# being guessed into a family.
+# identity. `agy`, `pi`, and `pi-signed` are exact because Antigravity ships as
+# exactly `agy` and broader prefixes would swallow unrelated commands.
+# An unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
@@ -88,7 +88,7 @@ fm_control_harness_family() {  # <recorded-harness>
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
     muse|muse-bin-*) printf 'muse' ;;
-    agy*) printf 'agy' ;;
+    agy) printf 'agy' ;;
     *) return 1 ;;
   esac
 }

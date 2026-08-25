@@ -311,21 +311,22 @@ test_interrupt_sends_each_harness_verified_key() {
   pass "fm-control interrupt: every verified harness gets its own verified key and repeat count"
 }
 
-# A recorded harness can carry a raw launch command's basename, so the tables
-# are reached through one prefix rule rather than an exact string match.
+# A recorded harness can carry a raw launch command's basename, so most tables
+# accept a verified prefix while adapters with exact identities remain exact.
 test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed agy:agy agy-cli:agy; do
+      pi-signed:pi-signed agy:agy; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
       || fail "'$recorded' should resolve to the $want adapter"
     [ "$got" = "$want" ] || fail "'$recorded' should resolve to $want, got '$got'"
   done
-  for recorded in someagent musescore amuse notmuse-bin muse-binary muse-bind muse-cli; do
+  for recorded in someagent musescore amuse notmuse-bin muse-binary muse-bind muse-cli \
+      agytest agy-helper agy-cli; do
     fm_control_harness_family "$recorded" \
       && fail "unrecognized launch command '$recorded' must not be guessed into an adapter family"
   done

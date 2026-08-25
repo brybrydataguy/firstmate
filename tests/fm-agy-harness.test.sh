@@ -651,6 +651,39 @@ test_agy_refuses_secondmate() {
   pass "fm-spawn: agy is restricted to crewmate and scout work"
 }
 
+test_agy_like_raw_worker_stays_unverified() {
+  local rec case_dir home proj wt fakebin launchlog id out meta launched
+  rec=$(make_spawn_case raw-lookalike)
+  IFS="|" read -r case_dir home proj wt fakebin launchlog id <<EOF
+$rec
+EOF
+  : > "$launchlog"
+  : > "$launchlog.endpoints"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX='fake,1,0' \
+    FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$launchlog.endpoints" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" 'agytest --example' \
+      --mode no-mistakes --yolo off 2>&1)
+  expect_code 0 $? "an unrelated raw worker should still launch through the escape hatch: $out"
+  meta=$(cat "$home/state/$id.meta")
+  assert_contains "$meta" "harness=agytest" \
+    "raw worker metadata did not retain its unverified command identity: $meta"
+  assert_not_contains "$meta" "process_scope_token=" \
+    "agy-like raw worker was granted a verified adapter process scope: $meta"
+  assert_absent "$home/state/$id.process-scope" \
+    "agy-like raw worker created an Antigravity process-scope record"
+  assert_absent "$wt/.agents/plugins/fm-firstmate-busy-$id" \
+    "agy-like raw worker installed Antigravity lifecycle hooks"
+  launched=$(cat "$launchlog")
+  assert_not_contains "$launched" "fm-task-process-launch.sh" \
+    "agy-like raw worker entered the verified Antigravity launch enclosure"
+  pass "fm-spawn: agy-like raw workers remain unverified escape-hatch commands"
+}
+
 test_agy_busy_matching_and_liveness() {
   # shellcheck source=bin/fm-tmux-lib.sh
   . "$TMUX_LIB"
@@ -726,5 +759,6 @@ test_agy_post_allocation_failure_preserves_recovery_metadata
 test_agy_missing_binary_refuses_before_endpoint_creation
 test_agy_missing_process_enclosure_uses_portable_scope
 test_agy_refuses_secondmate
+test_agy_like_raw_worker_stays_unverified
 test_agy_busy_matching_and_liveness
 test_agy_crew_dispatch_validation

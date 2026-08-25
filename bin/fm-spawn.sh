@@ -318,7 +318,7 @@ for a in "$@"; do
     --relaunch) RELAUNCH=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
-    --raw-harness) want_value=raw-harness ;;
+    --raw-harness) want_value='raw-harness' ;;
     --raw-harness=*) RAW_HARNESS_ARG=${a#--raw-harness=}; RAW_HARNESS_SET=1 ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
@@ -851,12 +851,13 @@ spawn_herdr_presentation_order_lock_acquire() {
 
 clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path
-  # The wiring arms above match on harness PREFIXES, because a raw command with
+  # Most wiring arms above match on harness prefixes, because a raw command with
   # no declared --raw-harness identity records its command basename instead of
   # an exact adapter name. The retirement tables are keyed by the exact adapter,
   # so the recorded value is resolved to its adapter first; otherwise a task
-  # recorded as, say, `grok-2` would have wiring armed and never retired. An
-  # unrecognized value resolves to no adapter, which is also the case in which
+  # recorded as, say, `grok-2` would have wiring armed and never retired.
+  # Agy is exact because its verified command is exactly `agy`.
+  # An unrecognized value resolves to no adapter, which is also the case in which
   # no wiring was armed to begin with.
   harness=$(fm_control_harness_family "$harness") || harness=
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
@@ -941,7 +942,11 @@ publish_spawn_recovery_meta() {
       echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
       echo "cmux_surface_id=$CMUX_SURFACE_ID"
     fi
-  } > "$tmp" && mv -f -- "$tmp" "$STATE/$ID.meta" || {
+  } > "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  mv -f -- "$tmp" "$STATE/$ID.meta" || {
     rm -f -- "$tmp"
     return 1
   }
@@ -2559,7 +2564,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
 case "$HARNESS" in
-  agy*)
+  agy)
     if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
       AGY_RECOVERY_META_PENDING=1
     fi
@@ -2584,7 +2589,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed|agy*)
+    claude*|opencode*|pi|pi-signed|agy)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2711,7 +2716,7 @@ export default function (pi: any) {
 }
 EOF
       ;;
-    agy*)
+    agy)
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '%s\\n' '{}'")
