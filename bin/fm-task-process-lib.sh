@@ -4,7 +4,8 @@
 # `state/<id>.meta` binds the record through `process_scope_token=`, and the
 # matching `state/<id>.process-scope` is a private versioned record with one of
 # two states: `active` carries containment, ownership-anchor, agent-process, and
-# process-group identities, while `empty` carries only containment and the token.
+# process-group identities, while `empty` carries containment, the token, and an
+# optional endpoint identity retained from the active scope.
 # Writers publish each state atomically and readers reject symlinks, malformed
 # fields, stale tokens, changed process identities, and an owned group that has
 # moved, so no lifecycle operation signals processes from an unproved scope.
@@ -117,6 +118,23 @@ fm_task_process_identity_matches() {
   [ "$current" = "$2" ]
 }
 
+fm_task_process_recorded_identity_valid() {
+  local pid=$1 identity=$2 value
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  case "$identity" in
+    starttime=*)
+      value=${identity#starttime=}
+      case "$value" in ''|*[!0-9]*) return 1 ;; esac
+      ;;
+    lstart=*)
+      value=${identity#lstart=}
+      case "$value" in ''|*[!A-Za-z0-9_:.-]*) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_task_process_pgid() {
   local value
   value=$(LC_ALL=C ps -p "$1" -o pgid= 2>/dev/null) || return 1
@@ -195,6 +213,12 @@ EOF
       return 1
       ;;
   esac
+  if [ -n "$endpoint_pid" ] || [ -n "$endpoint_identity" ]; then
+    fm_task_process_recorded_identity_valid "$endpoint_pid" "$endpoint_identity" || {
+      echo "error: task $id has a malformed process-scope record at $path" >&2
+      return 1
+    }
+  fi
   case "$status" in
     empty)
       FM_TASK_PROCESS_SCOPE_STATUS=empty
@@ -207,8 +231,8 @@ EOF
       FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY=
       FM_TASK_PROCESS_SCOPE_AGENT_PID=
       FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY=
-      FM_TASK_PROCESS_SCOPE_ENDPOINT_PID=
-      FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY=
+      FM_TASK_PROCESS_SCOPE_ENDPOINT_PID=$endpoint_pid
+      FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY=$endpoint_identity
       FM_TASK_PROCESS_SCOPE_LEADER_PID=
       FM_TASK_PROCESS_SCOPE_LEADER_IDENTITY=
       FM_TASK_PROCESS_SCOPE_PGID=
@@ -279,28 +303,6 @@ EOF
   if [ -z "$identity_value" ] || [ "$agent_pid" -le 1 ]; then
     echo "error: task $id has a malformed process-scope record at $path" >&2
     return 1
-  fi
-  if [ -n "$endpoint_pid" ] || [ -n "$endpoint_identity" ]; then
-    case "$endpoint_pid" in
-      ''|*[!0-9]*) identity_value= ;;
-      *)
-        case "$endpoint_identity" in
-          starttime=*)
-            identity_value=${endpoint_identity#starttime=}
-            case "$identity_value" in ''|*[!0-9]*) identity_value= ;; esac
-            ;;
-          lstart=*)
-            identity_value=${endpoint_identity#lstart=}
-            case "$identity_value" in ''|*[!A-Za-z0-9_:.-]*) identity_value= ;; esac
-            ;;
-          *) identity_value= ;;
-        esac
-        ;;
-    esac
-    if [ -z "$identity_value" ] || [ "$endpoint_pid" -le 1 ]; then
-      echo "error: task $id has a malformed process-scope record at $path" >&2
-      return 1
-    fi
   fi
   FM_TASK_PROCESS_SCOPE_STATUS=active
   FM_TASK_PROCESS_SCOPE_VERSION=$version
@@ -403,14 +405,19 @@ EOF
 }
 
 fm_task_process_scope_mark_empty() {
-  local path=$1 token=$2 containment=$3 tmp
+  local path=$1 token=$2 containment=$3 endpoint_pid=${4:-} endpoint_identity=${5:-} tmp
   case "$containment" in pid-namespace|process-group|unknown) ;; *) return 1 ;; esac
+  if [ -n "$endpoint_pid" ] || [ -n "$endpoint_identity" ]; then
+    fm_task_process_recorded_identity_valid "$endpoint_pid" "$endpoint_identity" || return 1
+  fi
   tmp=$(umask 077; mktemp "${path%/*}/.${path##*/}.XXXXXX") || return 1
   if {
       printf 'version=2\n'
       printf 'status=empty\n'
       printf 'token=%s\n' "$token"
       printf 'containment=%s\n' "$containment"
+      [ -z "$endpoint_pid" ] || printf 'endpoint_pid=%s\n' "$endpoint_pid"
+      [ -z "$endpoint_identity" ] || printf 'endpoint_identity=%s\n' "$endpoint_identity"
     } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$path"; then
     return 0
   fi
@@ -500,7 +507,8 @@ fm_task_process_scope_quiesce() {
         return $?
       fi
       fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN" \
-        "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" || {
+        "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" \
+        "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY" || {
         echo "error: could not publish the empty process scope for task $id" >&2
         return 1
       }
@@ -558,7 +566,8 @@ EOF
     return $?
   fi
   fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN" \
-    "$FM_TASK_PROCESS_SCOPE_CONTAINMENT"
+    "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" \
+    "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY"
 }
 
 fm_task_process_scope_require_pid_namespace() {

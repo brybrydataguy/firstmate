@@ -537,6 +537,7 @@ case " $* " in
       found=1
     fi
     if process_is_live "${FM_EXPECT_ENDPOINT_PID:-}"; then
+      [ -z "${FM_EXPECT_ENDPOINT_LOG:-}" ] || printf 'endpoint-holder\n' >> "$FM_EXPECT_ENDPOINT_LOG"
       printf 'p%s\nfcwd\n' "$FM_EXPECT_ENDPOINT_PID"
       found=1
     fi
@@ -1441,7 +1442,8 @@ PY
 }
 
 start_agy_endpoint_scoped_sleeper() {
-  local state=$1 id=$2 cwd=$3 case_dir=$4 token attempts=0 enclosure
+  local state=$1 id=$2 cwd=$3 case_dir=$4 launch=${5:-sleep 300} persist=${6:-0}
+  local token attempts=0 enclosure
   token="test-$id"
   enclosure="$case_dir/fakebin/unshare"
   cat > "$enclosure" <<'SH'
@@ -1464,16 +1466,19 @@ SH
   fm_task_process_scope_create_empty "$state" "$id" "$token" pid-namespace \
     || fail "agy endpoint scope fixture could not create an empty scope"
   python3 - "$cwd" "$ROOT/bin/fm-task-process-launch.sh" \
-    "$state/$id.process-scope" "$token" "$enclosure" <<'PY' &
+    "$state/$id.process-scope" "$token" "$enclosure" "$launch" "$persist" <<'PY' &
 import os
+import signal
 import sys
 
 os.chdir(sys.argv[1])
 pid = os.fork()
 if pid == 0:
     os.setpgrp()
-    os.execv(sys.argv[2], [sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[4], "sleep 300", sys.argv[5]])
+    os.execv(sys.argv[2], [sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[4], sys.argv[6], sys.argv[5]])
 os.waitpid(pid, 0)
+if sys.argv[7] == "1":
+    signal.pause()
 os._exit(0)
 PY
   AGY_ENDPOINT_PID=$!
@@ -1601,6 +1606,59 @@ test_agy_teardown_recovers_stale_lock_before_quiescence() {
   assert_present "$case_dir/tmux-state" \
     "agy-stale-lock-preflight: teardown did not close the endpoint after recovery"
   pass "agy teardown recovers stale locks before worker quiescence"
+}
+
+test_agy_teardown_recovers_stale_lock_after_worker_exit() {
+  local case_dir lock endpoint_pid attempts=0 rc
+  case_dir=$(make_case agy-stale-lock-empty-scope)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  start_agy_endpoint_scoped_sleeper \
+    "$case_dir/state" task-x1 "$case_dir/wt" "$case_dir" "sleep 0.2" 1
+  endpoint_pid=$AGY_ENDPOINT_PID
+  while [ "$attempts" -lt 100 ]; do
+    if fm_task_process_scope_record_read \
+         "$case_dir/state" task-x1 test-task-x1 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ]; then
+      break
+    fi
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "${FM_TASK_PROCESS_SCOPE_STATUS:-}" = empty ] \
+    || fail "agy-stale-lock-empty-scope: worker scope did not become empty"
+  [ "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" = "$endpoint_pid" ] \
+    || fail "agy-stale-lock-empty-scope: empty scope lost its endpoint binding"
+  kill -0 "$endpoint_pid" 2>/dev/null \
+    || fail "agy-stale-lock-empty-scope: endpoint did not remain live"
+  add_lsof_scope_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_EXPECT_ENDPOINT_PID="$endpoint_pid" FM_EXPECT_SCOPE_WT="$case_dir/wt" \
+  FM_EXPECT_ENDPOINT_LOG="$case_dir/endpoint-holder.log" \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  kill -TERM "$endpoint_pid" 2>/dev/null || true
+  wait "$endpoint_pid" 2>/dev/null || true
+  expect_code 0 "$rc" "agy-stale-lock-empty-scope: teardown should recover"
+  assert_present "$case_dir/endpoint-holder.log" \
+    "agy-stale-lock-empty-scope: regression did not exercise the endpoint holder"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "agy-stale-lock-empty-scope: teardown did not recover the stale lock"
+  assert_absent "$lock" \
+    "agy-stale-lock-empty-scope: teardown left the stale lock in place"
+  assert_present "$case_dir/tmux-state" \
+    "agy-stale-lock-empty-scope: teardown did not close the endpoint after recovery"
+  pass "agy teardown recovers stale locks after worker exit"
 }
 
 test_agy_teardown_rejects_foreign_worktree_holder() {
@@ -3202,6 +3260,7 @@ test_agy_portable_scope_teardown_refuses_before_worktree_access
 test_agy_teardown_refuses_unsafe_work_before_quiescence
 test_agy_teardown_refuses_missing_lsof_before_quiescence
 test_agy_teardown_recovers_stale_lock_before_quiescence
+test_agy_teardown_recovers_stale_lock_after_worker_exit
 test_agy_teardown_rejects_foreign_worktree_holder
 test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_agy_teardown_rejects_replaced_worktree_before_mutation

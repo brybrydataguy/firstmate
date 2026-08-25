@@ -1296,22 +1296,32 @@ worktree_lock_has_only_expected_scope_holders() {
     return 1
   fi
   fm_task_process_scope_record_read "$state" "$id" "$token" || return 1
-  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 1
-  fm_task_process_identity_matches \
-    "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
-  anchor_pgid=$(fm_task_process_pgid "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID") || return 1
-  [ "$anchor_pgid" = "$FM_TASK_PROCESS_SCOPE_PGID" ] || return 1
-  snapshot=$(fm_task_process_scope_snapshot \
-    "$FM_TASK_PROCESS_SCOPE_TOKEN" "$FM_TASK_PROCESS_SCOPE_PGID" 1) || return 1
-  fm_task_process_scope_snapshot_contains "$snapshot" \
-    "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
   if [ -n "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] \
      && fm_task_process_identity_matches \
        "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY"; then
-    anchor_parent=$(fm_task_process_parent_pid "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID") || return 1
-    [ "$anchor_parent" = "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] || return 1
     endpoint_valid=1
   fi
+  case "$FM_TASK_PROCESS_SCOPE_STATUS" in
+    active)
+      fm_task_process_identity_matches \
+        "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
+      anchor_pgid=$(fm_task_process_pgid "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID") || return 1
+      [ "$anchor_pgid" = "$FM_TASK_PROCESS_SCOPE_PGID" ] || return 1
+      snapshot=$(fm_task_process_scope_snapshot \
+        "$FM_TASK_PROCESS_SCOPE_TOKEN" "$FM_TASK_PROCESS_SCOPE_PGID" 1) || return 1
+      fm_task_process_scope_snapshot_contains "$snapshot" \
+        "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
+      if [ "$endpoint_valid" -eq 1 ]; then
+        anchor_parent=$(fm_task_process_parent_pid "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID") || return 1
+        [ "$anchor_parent" = "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] || return 1
+      fi
+      ;;
+    empty)
+      [ "$endpoint_valid" -eq 1 ] || return 1
+      snapshot=
+      ;;
+    *) return 1 ;;
+  esac
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     identity=$(fm_task_process_identity "$pid") || return 1

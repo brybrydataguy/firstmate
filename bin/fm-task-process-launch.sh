@@ -134,7 +134,8 @@ done
 while :; do
   snapshot=$(fm_task_process_scope_snapshot "$token" "$pgid" 1 "$pid" 1) || exit 1
   if [ -z "$snapshot" ]; then
-    fm_task_process_scope_mark_empty "$record" "$token" "$containment" || exit 1
+    fm_task_process_scope_mark_empty \
+      "$record" "$token" "$containment" "$endpoint_pid" "$endpoint_identity" || exit 1
     exit "$launch_status"
   fi
   sleep 0.05
