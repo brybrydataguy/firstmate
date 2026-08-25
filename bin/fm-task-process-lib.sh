@@ -125,6 +125,14 @@ fm_task_process_pgid() {
   printf '%s\n' "$value"
 }
 
+fm_task_process_parent_pid() {
+  local value
+  value=$(LC_ALL=C ps -p "$1" -o ppid= 2>/dev/null) || return 1
+  value=${value//[[:space:]]/}
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
 fm_task_process_scope_record_value() {
   local path=$1 key=$2
   awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); value=$0} END {print value}' "$path"
@@ -133,7 +141,8 @@ fm_task_process_scope_record_value() {
 fm_task_process_scope_record_read() {
   local state=$1 id=$2 expected_token=$3 path record line key value
   local version= status= token= containment= leader_pid= leader_identity=
-  local anchor_pid anchor_identity agent_pid agent_identity pgid identity_value legacy=0
+  local anchor_pid anchor_identity agent_pid agent_identity endpoint_pid endpoint_identity
+  local pgid identity_value legacy=0
   path=$(fm_task_process_scope_path "$state" "$id") || return 1
   if [ ! -f "$path" ] || [ -L "$path" ]; then
     echo "error: task $id has no trustworthy process-scope record at $path" >&2
@@ -147,6 +156,8 @@ fm_task_process_scope_record_read() {
   anchor_identity=
   agent_pid=
   agent_identity=
+  endpoint_pid=
+  endpoint_identity=
   pgid=
   while IFS= read -r line; do
     case "$line" in *=*) ;; *) continue ;; esac
@@ -163,6 +174,8 @@ fm_task_process_scope_record_read() {
       anchor_identity) anchor_identity=$value ;;
       agent_pid) agent_pid=$value ;;
       agent_identity) agent_identity=$value ;;
+      endpoint_pid) endpoint_pid=$value ;;
+      endpoint_identity) endpoint_identity=$value ;;
       pgid) pgid=$value ;;
     esac
   done <<EOF
@@ -194,6 +207,8 @@ EOF
       FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY=
       FM_TASK_PROCESS_SCOPE_AGENT_PID=
       FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY=
+      FM_TASK_PROCESS_SCOPE_ENDPOINT_PID=
+      FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY=
       FM_TASK_PROCESS_SCOPE_LEADER_PID=
       FM_TASK_PROCESS_SCOPE_LEADER_IDENTITY=
       FM_TASK_PROCESS_SCOPE_PGID=
@@ -265,6 +280,28 @@ EOF
     echo "error: task $id has a malformed process-scope record at $path" >&2
     return 1
   fi
+  if [ -n "$endpoint_pid" ] || [ -n "$endpoint_identity" ]; then
+    case "$endpoint_pid" in
+      ''|*[!0-9]*) identity_value= ;;
+      *)
+        case "$endpoint_identity" in
+          starttime=*)
+            identity_value=${endpoint_identity#starttime=}
+            case "$identity_value" in ''|*[!0-9]*) identity_value= ;; esac
+            ;;
+          lstart=*)
+            identity_value=${endpoint_identity#lstart=}
+            case "$identity_value" in ''|*[!A-Za-z0-9_:.-]*) identity_value= ;; esac
+            ;;
+          *) identity_value= ;;
+        esac
+        ;;
+    esac
+    if [ -z "$identity_value" ] || [ "$endpoint_pid" -le 1 ]; then
+      echo "error: task $id has a malformed process-scope record at $path" >&2
+      return 1
+    fi
+  fi
   FM_TASK_PROCESS_SCOPE_STATUS=active
   FM_TASK_PROCESS_SCOPE_VERSION=$version
   FM_TASK_PROCESS_SCOPE_TOKEN=$token
@@ -275,6 +312,8 @@ EOF
   FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY=$anchor_identity
   FM_TASK_PROCESS_SCOPE_AGENT_PID=$agent_pid
   FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY=$agent_identity
+  FM_TASK_PROCESS_SCOPE_ENDPOINT_PID=$endpoint_pid
+  FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY=$endpoint_identity
   FM_TASK_PROCESS_SCOPE_LEADER_PID=$anchor_pid
   FM_TASK_PROCESS_SCOPE_LEADER_IDENTITY=$anchor_identity
   FM_TASK_PROCESS_SCOPE_PGID=$pgid

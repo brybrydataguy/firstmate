@@ -1286,7 +1286,8 @@ worktree_safety_blocked_by_lock() {
 }
 
 worktree_lock_has_only_expected_scope_holders() {
-  local dir=$1 state=$2 id=$3 token=$4 holders holder_rc anchor_pgid snapshot pid identity
+  local dir=$1 state=$2 id=$3 token=$4 holders holder_rc anchor_pgid anchor_parent
+  local snapshot pid identity endpoint_valid=0
   if holders=$(fm_lock_lsof_holder_pids "$dir"); then
     :
   else
@@ -1304,10 +1305,23 @@ worktree_lock_has_only_expected_scope_holders() {
     "$FM_TASK_PROCESS_SCOPE_TOKEN" "$FM_TASK_PROCESS_SCOPE_PGID" 1) || return 1
   fm_task_process_scope_snapshot_contains "$snapshot" \
     "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
+  if [ -n "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] \
+     && fm_task_process_identity_matches \
+       "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY"; then
+    anchor_parent=$(fm_task_process_parent_pid "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID") || return 1
+    [ "$anchor_parent" = "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] || return 1
+    endpoint_valid=1
+  fi
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     identity=$(fm_task_process_identity "$pid") || return 1
-    fm_task_process_scope_snapshot_contains "$snapshot" "$pid" "$identity" || return 1
+    if fm_task_process_scope_snapshot_contains "$snapshot" "$pid" "$identity"; then
+      continue
+    fi
+    [ "$endpoint_valid" -eq 1 ] \
+      && [ "$pid" = "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" ] \
+      && [ "$identity" = "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY" ] \
+      || return 1
   done <<< "$holders"
 }
 

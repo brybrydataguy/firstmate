@@ -521,6 +521,9 @@ case " $* " in
     if process_is_live "${FM_EXPECT_SCOPE_PID:-}"; then
       printf 'p%s\nfcwd\nn%s\n' "$FM_EXPECT_SCOPE_PID" "$FM_EXPECT_SCOPE_WT"
     fi
+    if process_is_live "${FM_EXPECT_ENDPOINT_PID:-}"; then
+      printf 'p%s\nfcwd\nn%s\n' "$FM_EXPECT_ENDPOINT_PID" "$FM_EXPECT_SCOPE_WT"
+    fi
     if process_is_live "${FM_EXPECT_FOREIGN_PID:-}"; then
       printf 'p%s\nfcwd\nn%s\n' "$FM_EXPECT_FOREIGN_PID" "$FM_EXPECT_SCOPE_WT"
     fi
@@ -531,6 +534,10 @@ case " $* " in
     if process_is_live "${FM_EXPECT_SCOPE_PID:-}"; then
       [ -z "${FM_EXPECT_SCOPE_LOG:-}" ] || printf 'scope-holder\n' >> "$FM_EXPECT_SCOPE_LOG"
       printf 'p%s\nfcwd\n' "$FM_EXPECT_SCOPE_PID"
+      found=1
+    fi
+    if process_is_live "${FM_EXPECT_ENDPOINT_PID:-}"; then
+      printf 'p%s\nfcwd\n' "$FM_EXPECT_ENDPOINT_PID"
       found=1
     fi
     if process_is_live "${FM_EXPECT_FOREIGN_PID:-}"; then
@@ -1433,6 +1440,58 @@ PY
   } > "$state/$id.process-scope"
 }
 
+start_agy_endpoint_scoped_sleeper() {
+  local state=$1 id=$2 cwd=$3 case_dir=$4 token attempts=0 enclosure
+  token="test-$id"
+  enclosure="$case_dir/fakebin/unshare"
+  cat > "$enclosure" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--map-current-user|--pid|--fork|--kill-child=SIGKILL|--mount-proc) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = /bin/sh ] && [ "${2:-}" = -c ] \
+   && [ "${3:-}" = '[ "$$" -eq 1 ]' ]; then
+  exit 0
+fi
+exec "$@"
+SH
+  chmod +x "$enclosure"
+  printf 'spawn_gen=%s\n' "$token" >> "$state/$id.meta"
+  fm_task_process_scope_create_empty "$state" "$id" "$token" pid-namespace \
+    || fail "agy endpoint scope fixture could not create an empty scope"
+  python3 - "$cwd" "$ROOT/bin/fm-task-process-launch.sh" \
+    "$state/$id.process-scope" "$token" "$enclosure" <<'PY' &
+import os
+import sys
+
+os.chdir(sys.argv[1])
+pid = os.fork()
+if pid == 0:
+    os.setpgrp()
+    os.execv(sys.argv[2], [sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[4], "sleep 300", sys.argv[5]])
+os.waitpid(pid, 0)
+os._exit(0)
+PY
+  AGY_ENDPOINT_PID=$!
+  while [ "$attempts" -lt 100 ]; do
+    if fm_task_process_scope_record_read "$state" "$id" "$token" 2>/dev/null \
+       && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ]; then
+      break
+    fi
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "${FM_TASK_PROCESS_SCOPE_STATUS:-}" = active ] \
+    || fail "agy endpoint scope fixture did not become active"
+  AGY_SCOPE_PID=$FM_TASK_PROCESS_SCOPE_ANCHOR_PID
+  [ "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" = "$AGY_ENDPOINT_PID" ] \
+    || fail "agy endpoint scope fixture did not bind its waiting parent"
+}
+
 test_agy_portable_scope_teardown_refuses_before_worktree_access() {
   local case_dir rc
   case_dir=$(make_case agy-portable-scope)
@@ -1500,16 +1559,20 @@ test_agy_teardown_refuses_missing_lsof_before_quiescence() {
 }
 
 test_agy_teardown_recovers_stale_lock_before_quiescence() {
-  local case_dir lock pid rc
+  local case_dir lock pid endpoint_pid rc
   case_dir=$(make_case agy-stale-lock-preflight)
   write_meta "$case_dir" no-mistakes ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
-  start_agy_scoped_sleeper "$case_dir/state" task-x1 "$case_dir/wt"
+  start_agy_endpoint_scoped_sleeper \
+    "$case_dir/state" task-x1 "$case_dir/wt" "$case_dir"
   pid=$AGY_SCOPE_PID
+  endpoint_pid=$AGY_ENDPOINT_PID
   kill -0 "$pid" 2>/dev/null || fail "agy-stale-lock-preflight: setup worker did not start"
+  kill -0 "$endpoint_pid" 2>/dev/null \
+    || fail "agy-stale-lock-preflight: setup endpoint did not start"
   add_lsof_scope_holder "$case_dir"
   add_git_status_lock_failure "$case_dir"
   lock=$(git_index_lock_path "$case_dir/wt")
@@ -1518,15 +1581,16 @@ test_agy_teardown_recovers_stale_lock_before_quiescence() {
   touch -t 200001010000 "$lock"
 
   rc=0
-  FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_SCOPE_WT="$case_dir/wt" \
+  FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_ENDPOINT_PID="$endpoint_pid" \
+  FM_EXPECT_SCOPE_WT="$case_dir/wt" \
   FM_EXPECT_SCOPE_LOG="$case_dir/scope-holder.log" \
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if [ "$rc" -ne 0 ]; then
-    kill -KILL "$pid" 2>/dev/null || true
+    kill -KILL "$pid" "$endpoint_pid" 2>/dev/null || true
   fi
-  wait "$pid" 2>/dev/null || true
+  wait "$endpoint_pid" 2>/dev/null || true
   expect_code 0 "$rc" "agy-stale-lock-preflight: teardown should recover"
   assert_present "$case_dir/scope-holder.log" \
     "agy-stale-lock-preflight: regression did not exercise a live scope holder"
@@ -1540,15 +1604,18 @@ test_agy_teardown_recovers_stale_lock_before_quiescence() {
 }
 
 test_agy_teardown_rejects_foreign_worktree_holder() {
-  local case_dir lock pid foreign_pid pgid attempts=0 process_stat rc scope_alive=0 foreign_alive=0
+  local case_dir lock pid endpoint_pid foreign_pid pgid attempts=0 process_stat rc
+  local scope_alive=0 endpoint_alive=0 foreign_alive=0
   case_dir=$(make_case agy-foreign-holder-preflight)
   write_meta "$case_dir" no-mistakes ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
-  start_agy_scoped_sleeper "$case_dir/state" task-x1 "$case_dir/wt"
+  start_agy_endpoint_scoped_sleeper \
+    "$case_dir/state" task-x1 "$case_dir/wt" "$case_dir"
   pid=$AGY_SCOPE_PID
+  endpoint_pid=$AGY_ENDPOINT_PID
   kill -0 "$pid" 2>/dev/null || fail "agy-foreign-holder-preflight: setup worker did not start"
   python3 - "$case_dir/wt" <<'PY' &
 import os
@@ -1566,8 +1633,8 @@ PY
     attempts=$((attempts + 1))
   done
   if [ "$pgid" != "$foreign_pid" ]; then
-    kill -KILL "$pid" "$foreign_pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    kill -KILL "$pid" "$endpoint_pid" "$foreign_pid" 2>/dev/null || true
+    wait "$endpoint_pid" 2>/dev/null || true
     wait "$foreign_pid" 2>/dev/null || true
     fail "agy-foreign-holder-preflight: setup foreign holder did not start"
   fi
@@ -1579,7 +1646,8 @@ PY
   touch -t 200001010000 "$lock"
 
   rc=0
-  FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_FOREIGN_PID="$foreign_pid" \
+  FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_ENDPOINT_PID="$endpoint_pid" \
+  FM_EXPECT_FOREIGN_PID="$foreign_pid" \
   FM_EXPECT_SCOPE_WT="$case_dir/wt" \
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -1588,16 +1656,22 @@ PY
     process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$pid" 2>/dev/null || true)
     case "$process_stat" in ''|*Z*) ;; *) scope_alive=1 ;; esac
   fi
+  if kill -0 "$endpoint_pid" 2>/dev/null; then
+    process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$endpoint_pid" 2>/dev/null || true)
+    case "$process_stat" in ''|*Z*) ;; *) endpoint_alive=1 ;; esac
+  fi
   if kill -0 "$foreign_pid" 2>/dev/null; then
     process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$foreign_pid" 2>/dev/null || true)
     case "$process_stat" in ''|*Z*) ;; *) foreign_alive=1 ;; esac
   fi
-  kill -KILL "$pid" "$foreign_pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  kill -KILL "$pid" "$endpoint_pid" "$foreign_pid" 2>/dev/null || true
+  wait "$endpoint_pid" 2>/dev/null || true
   wait "$foreign_pid" 2>/dev/null || true
   expect_code 1 "$rc" "agy-foreign-holder-preflight: teardown should refuse"
   [ "$scope_alive" -eq 1 ] \
     || fail "agy-foreign-holder-preflight: teardown stopped the worker before refusing"
+  [ "$endpoint_alive" -eq 1 ] \
+    || fail "agy-foreign-holder-preflight: teardown stopped the endpoint before refusing"
   [ "$foreign_alive" -eq 1 ] \
     || fail "agy-foreign-holder-preflight: teardown stopped the foreign holder"
   assert_grep "not provably stale" "$case_dir/stderr" \

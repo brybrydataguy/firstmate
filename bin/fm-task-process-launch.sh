@@ -67,6 +67,9 @@ else
   [ "$FM_TASK_PROCESS_SCOPE_STATUS" = empty ] || exit 1
 fi
 pid=$$
+endpoint_pid=$(fm_task_process_parent_pid "$pid") || exit 1
+case "$endpoint_pid" in ''|*[!0-9]*|0|1) exit 1 ;; esac
+endpoint_identity=$(fm_task_process_identity "$endpoint_pid") || exit 1
 pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || exit 1
 case "$pgid" in ''|*[!0-9]*|0|1) exit 1 ;; esac
 [ "$pgid" = "$pid" ] || {
@@ -113,6 +116,8 @@ trap scope_launch_cleanup EXIT
   printf 'anchor_identity=%s\n' "$anchor_identity"
   printf 'agent_pid=%s\n' "$agent_pid"
   printf 'agent_identity=%s\n' "$agent_identity"
+  printf 'endpoint_pid=%s\n' "$endpoint_pid"
+  printf 'endpoint_identity=%s\n' "$endpoint_identity"
   printf 'pgid=%s\n' "$pgid"
 } > "$tmp"
 chmod 0600 "$tmp"
