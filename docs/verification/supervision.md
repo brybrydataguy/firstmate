@@ -203,6 +203,7 @@ Deterministic entry points:
 ```sh
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
+tests/fm-agy-harness.test.sh
 tests/fm-crew-state.test.sh
 ```
 

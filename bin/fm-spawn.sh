@@ -38,9 +38,10 @@
 #   command. It is required for raw secondmate launches and optional for raw
 #   worker launches; it does not change the command being launched.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   axes chosen by firstmate at intake. They reach a harness only through a
+#   verified adapter mapping; a value with no verified mapping is omitted from
+#   that harness's launch rather than guessed. docs/configuration.md owns
+#   adapter-specific defaults and translations such as agy's effort cap.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
