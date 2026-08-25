@@ -88,7 +88,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
-      *agy*) echo agy; return ;;
+      agy) echo agy; return ;;
       kimi) echo kimi; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
@@ -106,7 +106,6 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
-          *agy*) echo agy; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

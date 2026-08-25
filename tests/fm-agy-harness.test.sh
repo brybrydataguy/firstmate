@@ -125,6 +125,46 @@ test_agy_harness_detection() {
   pass "fm-harness detects agy without granting primary session ownership"
 }
 
+test_agy_ancestry_detection_is_anchored() {
+  local dir bin out helper
+  dir="$TMP_ROOT/ancestry-detection"
+  mkdir -p "$dir"
+
+  cp "$(command -v bash)" "$dir/agy"
+  out=$(env -u ANTIGRAVITY_LS_VERSION -u ANTIGRAVITY_SOURCE_METADATA \
+    -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    "$dir/agy" -c "r=\$(\"$HARNESS_SH\"); printf '%s' \"\$r\"")
+  [ "$out" = agy ] || fail "exact agy process ancestry reported '$out'"
+
+  for bin in notagy agy-helper; do
+    cp "$(command -v bash)" "$dir/$bin"
+    out=$(env -u ANTIGRAVITY_LS_VERSION -u ANTIGRAVITY_SOURCE_METADATA \
+      -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      "$dir/$bin" -c "r=\$(\"$HARNESS_SH\"); printf '%s' \"\$r\"")
+    [ "$out" != agy ] \
+      || fail "unrelated process '$bin' was misdetected as agy"
+  done
+
+  if command -v python3 >/dev/null 2>&1; then
+    helper="$dir/notagy-helper.py"
+    cat > "$helper" <<'PY'
+import subprocess
+import sys
+
+sys.stdout.write(subprocess.check_output([sys.argv[1]], text=True))
+PY
+    out=$(env -u ANTIGRAVITY_LS_VERSION -u ANTIGRAVITY_SOURCE_METADATA \
+      -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      python3 "$helper" "$HARNESS_SH")
+    [ "$out" != agy ] \
+      || fail "an unrelated interpreter argument containing agy was misdetected"
+  fi
+  pass "fm-harness detects only agy's exact executable ancestry"
+}
+
 test_agy_default_model_and_launch_template() {
   local rec case_dir home proj wt fakebin launchlog id out launched meta_file state_real
   rec=$(make_spawn_case default-model)
@@ -641,6 +681,10 @@ test_agy_busy_matching_and_liveness() {
 
   TEST_COMM=/opt/homebrew/bin/agy
   [ "$(fm_backend_tmux_agent_state "firstmate:dummy")" = "alive" ] || fail "tmux agent state did not report alive for full path agy"
+
+  TEST_COMM=/opt/homebrew/bin/notagy
+  [ "$(fm_backend_tmux_agent_state "firstmate:dummy")" = "ambiguous" ] \
+    || fail "tmux agent state misclassified an unrelated agy-containing process"
   pass "fm-tmux-lib and tmux backend: agy busy signature and liveness detection verified"
 }
 
@@ -669,6 +713,7 @@ test_agy_crew_dispatch_validation() {
 }
 
 test_agy_harness_detection
+test_agy_ancestry_detection_is_anchored
 test_agy_default_model_and_launch_template
 test_agy_process_scope_launcher
 test_agy_process_scope_wait_survives_signals
