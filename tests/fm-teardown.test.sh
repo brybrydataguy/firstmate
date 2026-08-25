@@ -1458,6 +1458,68 @@ test_agy_teardown_refuses_missing_lsof_before_quiescence() {
   pass "agy teardown preserves workers when strict process proof is unavailable"
 }
 
+test_agy_teardown_recovers_stale_lock_before_quiescence() {
+  local case_dir lock rc
+  case_dir=$(make_case agy-stale-lock-preflight)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_lsof_no_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "agy-stale-lock-preflight: teardown should recover"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "agy-stale-lock-preflight: teardown did not recover the stale lock"
+  assert_absent "$lock" \
+    "agy-stale-lock-preflight: teardown left the stale lock in place"
+  assert_present "$case_dir/tmux-state" \
+    "agy-stale-lock-preflight: teardown did not close the endpoint after recovery"
+  pass "agy teardown recovers stale locks before worker quiescence"
+}
+
+test_agy_teardown_preserves_live_lock_and_worker() {
+  local case_dir lock rc
+  case_dir=$(make_case agy-live-lock-preflight)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
+  mark_agy_scope_empty "$case_dir/state" task-x1
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_lsof_live_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "agy-live-lock-preflight: teardown should refuse"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "agy-live-lock-preflight: teardown did not report the live lock"
+  assert_present "$lock" \
+    "agy-live-lock-preflight: teardown removed a live-held lock"
+  assert_absent "$case_dir/tmux-state" \
+    "agy-live-lock-preflight: teardown closed the endpoint after refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "agy-live-lock-preflight: teardown removed task metadata after refusing"
+  pass "agy teardown preserves live locks and workers"
+}
+
 test_agy_teardown_does_not_follow_replaced_plugin_symlink() {
   local case_dir plugin target rc
   case_dir=$(make_case agy-plugin-symlink)
@@ -2974,6 +3036,8 @@ test_teardown_missing_busy_sidecar_completes
 test_agy_portable_scope_teardown_refuses_before_worktree_access
 test_agy_teardown_refuses_unsafe_work_before_quiescence
 test_agy_teardown_refuses_missing_lsof_before_quiescence
+test_agy_teardown_recovers_stale_lock_before_quiescence
+test_agy_teardown_preserves_live_lock_and_worker
 test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_agy_teardown_rejects_replaced_worktree_before_mutation
 test_agy_teardown_revalidates_worktree_after_endpoint_quiescence

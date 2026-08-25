@@ -1450,6 +1450,18 @@ validate_worktree_teardown_safety() {
   fi
 }
 
+validate_worktree_teardown_safety_with_lock_recovery() {
+  local safety_rc
+  if validate_worktree_teardown_safety; then
+    return 0
+  else
+    safety_rc=$?
+  fi
+  [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ] || return "$safety_rc"
+  cleanup_stale_lock_for_safety_check "$WT" || return $?
+  validate_worktree_teardown_safety
+}
+
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
 # worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
 # that is about to be removed? Prints nothing; returns 0 only on a genuine
@@ -2861,15 +2873,7 @@ if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
   AGY_WORKTREE_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
   task_worktree_process_scan_strict worktree "$WT" "$TASK_TMP" || exit 1
   if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-    if validate_worktree_teardown_safety; then
-      :
-    else
-      safety_rc=$?
-      if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-        echo "REFUSED: worktree safety preflight is blocked by a git lock; preserving the agy worker and endpoint for retry." >&2
-      fi
-      exit 1
-    fi
+    validate_worktree_teardown_safety_with_lock_recovery || exit 1
   fi
   fm_task_process_scope_quiesce "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy" || exit 1
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
@@ -2912,17 +2916,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
-    :
-  else
-    safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
-    else
-      exit 1
-    fi
-  fi
+  validate_worktree_teardown_safety_with_lock_recovery || exit 1
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
