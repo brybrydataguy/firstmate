@@ -89,7 +89,7 @@ Run the live guard after an upgrade to any harness it enumerates and before trus
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
-`tests/fm-agy-harness.test.sh` pins agy's expected process identity with a stub, but the live drift guard does not yet enumerate agy, so no refreshable real Antigravity liveness result is recorded here.
+`tests/fm-agy-harness.test.sh` pins agy's exact process identity and the inherited-marker precedence across every markerless harness with real renamed shell processes, but the live drift guard does not yet enumerate agy, so no refreshable real Antigravity liveness result is recorded here.
 
 Bounded output from the run that produced the table:
 

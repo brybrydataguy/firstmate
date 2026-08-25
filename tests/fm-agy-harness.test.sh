@@ -107,11 +107,19 @@ agy_launch_fragment() {
 }
 
 test_agy_harness_detection() {
-  local out
-  out=$(ANTIGRAVITY_LS_VERSION=cli-1.1.19 "$HARNESS_SH")
+  local dir fakebin out
+  dir="$TMP_ROOT/marker-fallback"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(PATH="$fakebin:$PATH" ANTIGRAVITY_LS_VERSION=cli-1.1.19 "$HARNESS_SH")
   [ "$out" = "agy" ] || fail "harness detection failed on ANTIGRAVITY_LS_VERSION marker: $out"
 
-  out=$(ANTIGRAVITY_SOURCE_METADATA='{"conversationId":"123"}' "$HARNESS_SH")
+  out=$(PATH="$fakebin:$PATH" ANTIGRAVITY_SOURCE_METADATA='{"conversationId":"123"}' "$HARNESS_SH")
   [ "$out" = "agy" ] || fail "harness detection failed on ANTIGRAVITY_SOURCE_METADATA marker: $out"
 
   # shellcheck source=bin/fm-session-lock-lib.sh
@@ -123,6 +131,28 @@ test_agy_harness_detection() {
     fail "worker-only agy was present in the primary path-identity table"
   fi
   pass "fm-harness detects agy without granting primary session ownership"
+}
+
+test_agy_markers_defer_to_markerless_harness_ancestry() {
+  local dir bin expected out
+  dir="$TMP_ROOT/inherited-marker-detection"
+  mkdir -p "$dir"
+
+  for bin in codex opencode kimi muse-bin-0.1.0-R708.1; do
+    case "$bin" in
+      muse-bin-*) expected=muse ;;
+      *) expected=$bin ;;
+    esac
+    cp "$(command -v bash)" "$dir/$bin"
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      ANTIGRAVITY_LS_VERSION=cli-1.1.19 \
+      ANTIGRAVITY_SOURCE_METADATA='{"conversationId":"inherited"}' \
+      "$dir/$bin" -c "r=\$(\"$HARNESS_SH\"); printf '%s' \"\$r\"")
+    [ "$out" = "$expected" ] \
+      || fail "inherited agy markers overrode $expected ancestry: $out"
+  done
+  pass "inherited agy markers defer to markerless harness ancestry"
 }
 
 test_agy_ancestry_detection_is_anchored() {
@@ -746,6 +776,7 @@ test_agy_crew_dispatch_validation() {
 }
 
 test_agy_harness_detection
+test_agy_markers_defer_to_markerless_harness_ancestry
 test_agy_ancestry_detection_is_anchored
 test_agy_default_model_and_launch_template
 test_agy_process_scope_launcher

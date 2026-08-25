@@ -18,7 +18,9 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
+# Detection layers: verified environment markers and process ancestry.
+# Antigravity markers are deferred until after ancestry because a manually
+# launched markerless harness can inherit them from an Antigravity shell.
 # Record each newly verified env marker here.
 set -u
 
@@ -31,8 +33,9 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 
 detect_own() {
+  local agy_marker=0 pid=$$ comm args argv0
   # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
+  # Keep marker detection before ancestry detection as the default precedence rule.
   # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
   # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
@@ -72,10 +75,13 @@ detect_own() {
   # by ancestry alone below. Do NOT promote MUSE_CURRENT_SESSION_LOG to a marker
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
-  # agy sets ANTIGRAVITY_LS_VERSION and ANTIGRAVITY_SOURCE_METADATA for child/tool processes.
-  [ -n "${ANTIGRAVITY_LS_VERSION:-}" ] || [ -n "${ANTIGRAVITY_SOURCE_METADATA:-}" ] && { echo agy; return; }
+  # agy sets ANTIGRAVITY_LS_VERSION and ANTIGRAVITY_SOURCE_METADATA for child/tool
+  # processes, but they survive in a harness launched manually from that shell.
+  # Let nearer recognized ancestry win, then use these markers as the fallback.
+  if [ -n "${ANTIGRAVITY_LS_VERSION:-}" ] || [ -n "${ANTIGRAVITY_SOURCE_METADATA:-}" ]; then
+    agy_marker=1
+  fi
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args argv0
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
@@ -114,6 +120,10 @@ detect_own() {
       break
     fi
   done
+  if [ "$agy_marker" -eq 1 ]; then
+    echo agy
+    return
+  fi
   echo unknown
 }
 
