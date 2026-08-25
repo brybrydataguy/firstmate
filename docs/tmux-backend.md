@@ -63,7 +63,7 @@ Muse is likewise anchored to the exact `muse` launcher identity or the installed
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
-Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
+Run the real-harness guard after an upgrade to any harness it enumerates and before trusting refreshed evidence; the verification record identifies adapters the guard still omits.
 
 ### Composer, busy state, and delivery
 
