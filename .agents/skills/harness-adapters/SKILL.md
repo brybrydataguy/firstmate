@@ -550,7 +550,7 @@ It is not verified for secondmate or primary work.
 | Process enclosure | [`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns the supported host behavior and agy transition limit; never override a process-scope refusal. |
 | Launch | `agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`; positional prompts are rejected with exit code 2. |
 | Models | `gemini-3.7-flash-high`, `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, Pro models, and Claude Sonnet/Opus models were present in the verified catalog. Authoritative discovery: `agy models`; Firstmate's current default is owned by [`docs/configuration.md`](../../../docs/configuration.md#harness-support). |
-| Busy state | Firstmate's generated plugin uses `PreInvocation` to open the turn. `Stop` with `fullyIdle: true` closes it immediately. `Stop` with `fullyIdle: false` records `unknown` because the official project hook surface provides no later background-completion event; malformed payloads also record `unknown`. A later `PreInvocation` or fully idle `Stop` supersedes that containment state. |
+| Busy state | Generated project plugin hooks `PreInvocation` and `Stop`; [architecture](../../../docs/architecture.md#busy-state-is-semantic-per-adapter) owns the verdict contract and [verification](../../../docs/verification/supervision.md#semantic-busy-state) owns active evidence. |
 | Delivery busy token | `esc to cancel`, the live footer present only while a turn is running. |
 | Exit command | `/exit` or `/quit` or `Ctrl+D` (exits cleanly with status 0). |
 | Interrupt | Single Escape or `Ctrl+C` cancels active turn and returns to composer; Firstmate uses `Ctrl+C` so interrupt delivery works on every supported backend, including Orca. |
@@ -563,14 +563,4 @@ It is not verified for secondmate or primary work.
 | Effort | The verified CLI accepts `--effort low\|medium\|high`; [`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns Firstmate's translation from the shared effort vocabulary. |
 | Resumption | Resumes prior conversations via `agy --conversation <id>` or `--continue` / `-c`. |
 
-`agy` delivers the launch brief through `--prompt-interactive` (`-i`) as a single interactive turn.
-Positional arguments are rejected by `agy` with exit code 2, so `--prompt-interactive` is required.
-Tool execution is fully autonomous once `--dangerously-skip-permissions` is passed and project trust is granted.
-On first interactive launch in an untrusted directory, `agy` renders a project trust confirmation prompt.
-Firstmate supervisors handle this dialog by sending `Enter` upon spawn peek.
-Accepted trust is saved to `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces` and persists across subsequent launches.
-Firstmate writes an isolated project plugin under `.agents/plugins/` so existing project hooks remain untouched.
-Its `PreInvocation` and `Stop` hooks are gated on workspace trust and fire normally once trust is granted.
-The lifecycle observer requires `jq` and uses only the documented hook payload.
-[`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns current worker process-scope behavior and the host-dependent agy transition limit.
 Antigravity CLI 1.1.9 and newer cap consecutive `decision: continue` responses, so Firstmate does not use continuation retries as completion state.
