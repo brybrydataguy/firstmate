@@ -505,6 +505,47 @@ SH
   chmod +x "$case_dir/fakebin/lsof"
 }
 
+add_lsof_scope_holder() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+process_is_live() {
+  local pid=$1 process_stat
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$pid" 2>/dev/null || true)
+  case "$process_stat" in ''|*Z*) return 1 ;; esac
+}
+case " $* " in
+  *" -a -d cwd -Fpn "*)
+    if process_is_live "${FM_EXPECT_SCOPE_PID:-}"; then
+      printf 'p%s\nfcwd\nn%s\n' "$FM_EXPECT_SCOPE_PID" "$FM_EXPECT_SCOPE_WT"
+    fi
+    if process_is_live "${FM_EXPECT_FOREIGN_PID:-}"; then
+      printf 'p%s\nfcwd\nn%s\n' "$FM_EXPECT_FOREIGN_PID" "$FM_EXPECT_SCOPE_WT"
+    fi
+    exit 0
+    ;;
+  *" -Fp -- $FM_EXPECT_SCOPE_WT "*)
+    found=0
+    if process_is_live "${FM_EXPECT_SCOPE_PID:-}"; then
+      [ -z "${FM_EXPECT_SCOPE_LOG:-}" ] || printf 'scope-holder\n' >> "$FM_EXPECT_SCOPE_LOG"
+      printf 'p%s\nfcwd\n' "$FM_EXPECT_SCOPE_PID"
+      found=1
+    fi
+    if process_is_live "${FM_EXPECT_FOREIGN_PID:-}"; then
+      printf 'p%s\nfcwd\n' "$FM_EXPECT_FOREIGN_PID"
+      found=1
+    fi
+    [ "$found" -eq 1 ]
+    exit $?
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+}
+
 add_lsof_error() {
   local case_dir=$1
   cat > "$case_dir/fakebin/lsof" <<'SH'
@@ -1459,15 +1500,17 @@ test_agy_teardown_refuses_missing_lsof_before_quiescence() {
 }
 
 test_agy_teardown_recovers_stale_lock_before_quiescence() {
-  local case_dir lock rc
+  local case_dir lock pid rc
   case_dir=$(make_case agy-stale-lock-preflight)
   write_meta "$case_dir" no-mistakes ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
-  mark_agy_scope_empty "$case_dir/state" task-x1
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
-  add_lsof_no_holder "$case_dir"
+  start_agy_scoped_sleeper "$case_dir/state" task-x1 "$case_dir/wt"
+  pid=$AGY_SCOPE_PID
+  kill -0 "$pid" 2>/dev/null || fail "agy-stale-lock-preflight: setup worker did not start"
+  add_lsof_scope_holder "$case_dir"
   add_git_status_lock_failure "$case_dir"
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1475,10 +1518,18 @@ test_agy_teardown_recovers_stale_lock_before_quiescence() {
   touch -t 200001010000 "$lock"
 
   rc=0
+  FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_SCOPE_WT="$case_dir/wt" \
+  FM_EXPECT_SCOPE_LOG="$case_dir/scope-holder.log" \
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
   expect_code 0 "$rc" "agy-stale-lock-preflight: teardown should recover"
+  assert_present "$case_dir/scope-holder.log" \
+    "agy-stale-lock-preflight: regression did not exercise a live scope holder"
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
     "agy-stale-lock-preflight: teardown did not recover the stale lock"
   assert_absent "$lock" \
@@ -1488,16 +1539,39 @@ test_agy_teardown_recovers_stale_lock_before_quiescence() {
   pass "agy teardown recovers stale locks before worker quiescence"
 }
 
-test_agy_teardown_preserves_live_lock_and_worker() {
-  local case_dir lock rc
-  case_dir=$(make_case agy-live-lock-preflight)
+test_agy_teardown_rejects_foreign_worktree_holder() {
+  local case_dir lock pid foreign_pid pgid attempts=0 process_stat rc scope_alive=0 foreign_alive=0
+  case_dir=$(make_case agy-foreign-holder-preflight)
   write_meta "$case_dir" no-mistakes ship
   printf 'harness=agy\n' >> "$case_dir/state/task-x1.meta"
-  mark_agy_scope_empty "$case_dir/state" task-x1
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
-  add_lsof_live_holder "$case_dir"
+  start_agy_scoped_sleeper "$case_dir/state" task-x1 "$case_dir/wt"
+  pid=$AGY_SCOPE_PID
+  kill -0 "$pid" 2>/dev/null || fail "agy-foreign-holder-preflight: setup worker did not start"
+  python3 - "$case_dir/wt" <<'PY' &
+import os
+import sys
+
+os.setpgrp()
+os.chdir(sys.argv[1])
+os.execv("/bin/sleep", ["sleep", "300"])
+PY
+  foreign_pid=$!
+  while [ "$attempts" -lt 50 ]; do
+    pgid=$(ps -o pgid= -p "$foreign_pid" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$foreign_pid" ] && break
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  if [ "$pgid" != "$foreign_pid" ]; then
+    kill -KILL "$pid" "$foreign_pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    wait "$foreign_pid" 2>/dev/null || true
+    fail "agy-foreign-holder-preflight: setup foreign holder did not start"
+  fi
+  add_lsof_scope_holder "$case_dir"
   add_git_status_lock_failure "$case_dir"
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1505,19 +1579,36 @@ test_agy_teardown_preserves_live_lock_and_worker() {
   touch -t 200001010000 "$lock"
 
   rc=0
+  FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_FOREIGN_PID="$foreign_pid" \
+  FM_EXPECT_SCOPE_WT="$case_dir/wt" \
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 1 "$rc" "agy-live-lock-preflight: teardown should refuse"
+  if kill -0 "$pid" 2>/dev/null; then
+    process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$pid" 2>/dev/null || true)
+    case "$process_stat" in ''|*Z*) ;; *) scope_alive=1 ;; esac
+  fi
+  if kill -0 "$foreign_pid" 2>/dev/null; then
+    process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$foreign_pid" 2>/dev/null || true)
+    case "$process_stat" in ''|*Z*) ;; *) foreign_alive=1 ;; esac
+  fi
+  kill -KILL "$pid" "$foreign_pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
+  expect_code 1 "$rc" "agy-foreign-holder-preflight: teardown should refuse"
+  [ "$scope_alive" -eq 1 ] \
+    || fail "agy-foreign-holder-preflight: teardown stopped the worker before refusing"
+  [ "$foreign_alive" -eq 1 ] \
+    || fail "agy-foreign-holder-preflight: teardown stopped the foreign holder"
   assert_grep "not provably stale" "$case_dir/stderr" \
-    "agy-live-lock-preflight: teardown did not report the live lock"
+    "agy-foreign-holder-preflight: teardown did not report the foreign holder"
   assert_present "$lock" \
-    "agy-live-lock-preflight: teardown removed a live-held lock"
+    "agy-foreign-holder-preflight: teardown removed the guarded lock"
   assert_absent "$case_dir/tmux-state" \
-    "agy-live-lock-preflight: teardown closed the endpoint after refusing"
+    "agy-foreign-holder-preflight: teardown closed the endpoint after refusing"
   assert_present "$case_dir/state/task-x1.meta" \
-    "agy-live-lock-preflight: teardown removed task metadata after refusing"
-  pass "agy teardown preserves live locks and workers"
+    "agy-foreign-holder-preflight: teardown removed task metadata after refusing"
+  pass "agy teardown rejects foreign worktree holders"
 }
 
 test_agy_teardown_does_not_follow_replaced_plugin_symlink() {
@@ -3037,7 +3128,7 @@ test_agy_portable_scope_teardown_refuses_before_worktree_access
 test_agy_teardown_refuses_unsafe_work_before_quiescence
 test_agy_teardown_refuses_missing_lsof_before_quiescence
 test_agy_teardown_recovers_stale_lock_before_quiescence
-test_agy_teardown_preserves_live_lock_and_worker
+test_agy_teardown_rejects_foreign_worktree_holder
 test_agy_teardown_does_not_follow_replaced_plugin_symlink
 test_agy_teardown_rejects_replaced_worktree_before_mutation
 test_agy_teardown_revalidates_worktree_after_endpoint_quiescence

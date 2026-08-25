@@ -89,9 +89,11 @@
 #      window. A missing `lsof`, or a lock that fails any stale check, is treated as
 #      NOT provably stale (fail safe): the lock is left untouched.
 # The same proof is used when non-force safety inspection cannot run because the lock
-# is present; teardown clears only a provably stale lock, then re-runs the safety
-# checks before any destructive return. Teardown output notes every wait, retry, and
-# removal so the operator can see what happened.
+# is present; a verified active agy scope may account for its own identity-bound
+# worktree-directory holders, but never a lock-file holder or any foreign holder.
+# Teardown clears only a provably stale lock, then re-runs the safety checks before
+# any destructive return. Teardown output notes every wait, retry, and removal so the
+# operator can see what happened.
 #
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
@@ -1283,8 +1285,34 @@ worktree_safety_blocked_by_lock() {
   return 0
 }
 
+worktree_lock_has_only_expected_scope_holders() {
+  local dir=$1 state=$2 id=$3 token=$4 holders holder_rc anchor_pgid snapshot pid identity
+  if holders=$(fm_lock_lsof_holder_pids "$dir"); then
+    :
+  else
+    holder_rc=$?
+    [ "$holder_rc" -eq 1 ] && return 0
+    return 1
+  fi
+  fm_task_process_scope_record_read "$state" "$id" "$token" || return 1
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 1
+  fm_task_process_identity_matches \
+    "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
+  anchor_pgid=$(fm_task_process_pgid "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID") || return 1
+  [ "$anchor_pgid" = "$FM_TASK_PROCESS_SCOPE_PGID" ] || return 1
+  snapshot=$(fm_task_process_scope_snapshot \
+    "$FM_TASK_PROCESS_SCOPE_TOKEN" "$FM_TASK_PROCESS_SCOPE_PGID" 1) || return 1
+  fm_task_process_scope_snapshot_contains "$snapshot" \
+    "$FM_TASK_PROCESS_SCOPE_ANCHOR_PID" "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    identity=$(fm_task_process_identity "$pid") || return 1
+    fm_task_process_scope_snapshot_contains "$snapshot" "$pid" "$identity" || return 1
+  done <<< "$holders"
+}
+
 cleanup_stale_lock_for_safety_check() {
-  local dir=$1 lock
+  local dir=$1 scope_state=${2:-} scope_id=${3:-} scope_token=${4:-} lock proven=0
   lock=$(worktree_git_lock_path "$dir") || lock=""
   [ -n "$lock" ] && [ -e "$lock" ] || return 0
 
@@ -1296,7 +1324,18 @@ cleanup_stale_lock_for_safety_check() {
     return 0
   fi
 
-  if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
+  if [ -n "$scope_state" ] && [ -n "$scope_id" ] && [ -n "$scope_token" ]; then
+    if fm_lock_is_provably_stale "$lock" "" "$STALE_WORKTREE_LOCK_AGE_SECS" \
+       && worktree_lock_has_only_expected_scope_holders \
+         "$dir" "$scope_state" "$scope_id" "$scope_token" \
+       && fm_lock_is_provably_stale "$lock" "" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
+      proven=1
+    fi
+  elif fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
+    proven=1
+  fi
+
+  if [ "$proven" -eq 1 ]; then
     rm -f "$lock"
     echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying worktree safety checks" >&2
     return 0
@@ -1451,14 +1490,15 @@ validate_worktree_teardown_safety() {
 }
 
 validate_worktree_teardown_safety_with_lock_recovery() {
-  local safety_rc
+  local safety_rc scope_state=${1:-} scope_id=${2:-} scope_token=${3:-}
   if validate_worktree_teardown_safety; then
     return 0
   else
     safety_rc=$?
   fi
   [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ] || return "$safety_rc"
-  cleanup_stale_lock_for_safety_check "$WT" || return $?
+  cleanup_stale_lock_for_safety_check \
+    "$WT" "$scope_state" "$scope_id" "$scope_token" || return $?
   validate_worktree_teardown_safety
 }
 
@@ -2873,7 +2913,8 @@ if [ "$HARNESS_FAMILY" = agy ] && [ "$KIND" != secondmate ]; then
   AGY_WORKTREE_IDENTITY=$(fm_control_harness_worktree_identity agy "$WT") || exit 1
   task_worktree_process_scan_strict worktree "$WT" "$TASK_TMP" || exit 1
   if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-    validate_worktree_teardown_safety_with_lock_recovery || exit 1
+    validate_worktree_teardown_safety_with_lock_recovery \
+      "$STATE" "$ID" "$AGY_SCOPE_TOKEN" || exit 1
   fi
   fm_task_process_scope_quiesce "$STATE" "$ID" "$AGY_SCOPE_TOKEN" "agy" || exit 1
   fm_control_harness_worktree_identity_verify agy "$WT" "$AGY_WORKTREE_IDENTITY" || exit 1
