@@ -255,6 +255,101 @@ fm_upstream_remote_name() {  # <config-dir>
   return 1
 }
 
+git_local_repository_identity() {
+  local dir=$1 path=$2 resolved
+  case "$path" in
+    /*) ;;
+    *) path=$dir/$path ;;
+  esac
+  resolved=$(resolved_existing_dir "$path") || return 1
+  printf 'local:%s\n' "$resolved"
+}
+
+git_network_repository_identity() {
+  local host=$1 port=$2 path=$3
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  while [ "${path#/}" != "$path" ]; do path=${path#/}; done
+  while [ "${path%/}" != "$path" ]; do path=${path%/}; done
+  case "$path" in *.git) path=${path%.git} ;; esac
+  [ -n "$host" ] && [ -n "$path" ] || return 1
+  case "$path" in *\?*|*\#*) return 1 ;; esac
+  if [ -n "$port" ]; then
+    printf 'network:%s:%s/%s\n' "$host" "$port" "$path"
+  else
+    printf 'network:%s/%s\n' "$host" "$path"
+  fi
+}
+
+git_repository_identity() {
+  local dir=$1 url=$2 rest scheme authority hostport host port path
+  case "$url" in
+    file://*)
+      rest=${url#file://}
+      case "$rest" in
+        /*) path=$rest ;;
+        localhost/*) path=/${rest#localhost/} ;;
+        *) return 1 ;;
+      esac
+      case "$path" in *%*|*\?*|*\#*) return 1 ;; esac
+      git_local_repository_identity "$dir" "$path"
+      ;;
+    *://*)
+      scheme=${url%%://*}
+      case "$scheme" in http|https|ssh|git) ;; *) return 1 ;; esac
+      rest=${url#*://}
+      authority=${rest%%/*}
+      [ "$authority" != "$rest" ] || return 1
+      path=${rest#*/}
+      hostport=${authority##*@}
+      port=""
+      case "$hostport" in
+        \[*\]:*)
+          host=${hostport%%]*}
+          host=${host#\[}
+          port=${hostport#*]:}
+          ;;
+        \[*\])
+          host=${hostport#\[}
+          host=${host%\]}
+          ;;
+        *:*)
+          host=${hostport%%:*}
+          port=${hostport#*:}
+          case "$port" in *:*) return 1 ;; esac
+          ;;
+        *) host=$hostport ;;
+      esac
+      case "$scheme:$port" in
+        http:80|https:443|ssh:22|git:9418) port="" ;;
+      esac
+      git_network_repository_identity "$host" "$port" "$path"
+      ;;
+    ./*|../*|/*)
+      git_local_repository_identity "$dir" "$url"
+      ;;
+    *:*)
+      hostport=${url%%:*}
+      path=${url#*:}
+      host=${hostport##*@}
+      git_network_repository_identity "$host" "" "$path"
+      ;;
+    *)
+      git_local_repository_identity "$dir" "$url"
+      ;;
+  esac
+}
+
+remote_advertised_default_branch() {
+  local dir=$1 remote=$2 out branch
+  out=$(git -C "$dir" ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
+  branch=$(printf '%s\n' "$out" |
+    sed -n 's/^ref: refs\/heads\/\([^[:space:]]*\)[[:space:]]\{1,\}HEAD$/\1/p')
+  [ -n "$branch" ] || return 1
+  case "$branch" in *$'\n'*) return 1 ;; esac
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$branch"
+}
+
 upstream_sync_refuse() {
   echo "upstream-sync: refused: $1"
 }
@@ -271,7 +366,9 @@ upstream_sync_refuse() {
 # is a reported skip rather than a failed run.
 sync_upstream_into_fork() {  # <repo-dir> <config-dir>
   local dir=$1 config_dir=$2
-  local remote default remote_head upstream_url origin_url
+  local remote default origin_default upstream_default remote_head
+  local upstream_urls origin_urls origin_push_urls upstream_url origin_url origin_push_url
+  local upstream_identity origin_identity origin_push_identity
   local upstream_rev origin_rev before after ahead out
 
   if ! remote=$(fm_upstream_remote_name "$config_dir"); then
@@ -300,15 +397,57 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
     upstream_sync_refuse "upstream remote '$remote' is the fork remote origin"
     return 0
   fi
-  if ! upstream_url=$(git -C "$dir" remote get-url "$remote" 2>/dev/null); then
+  if ! upstream_urls=$(git -C "$dir" remote get-url --all "$remote" 2>/dev/null); then
     upstream_sync_refuse "upstream remote '$remote' is not configured"
     return 0
   fi
-  if ! origin_url=$(git -C "$dir" remote get-url origin 2>/dev/null); then
+  case "$upstream_urls" in
+    *$'\n'*)
+      upstream_sync_refuse "upstream remote '$remote' has multiple fetch URLs"
+      return 0
+      ;;
+  esac
+  upstream_url=$upstream_urls
+  if ! origin_urls=$(git -C "$dir" remote get-url --all origin 2>/dev/null); then
     upstream_sync_refuse "no origin remote to land '$remote' on"
     return 0
   fi
-  if [ "$upstream_url" = "$origin_url" ]; then
+  case "$origin_urls" in
+    *$'\n'*)
+      upstream_sync_refuse "origin has multiple fetch URLs"
+      return 0
+      ;;
+  esac
+  origin_url=$origin_urls
+  if ! origin_push_urls=$(git -C "$dir" remote get-url --push --all origin 2>/dev/null); then
+    upstream_sync_refuse "cannot determine origin push destination"
+    return 0
+  fi
+  case "$origin_push_urls" in
+    *$'\n'*)
+      upstream_sync_refuse "origin has multiple push destinations"
+      return 0
+      ;;
+  esac
+  origin_push_url=$origin_push_urls
+
+  if ! upstream_identity=$(git_repository_identity "$dir" "$upstream_url"); then
+    upstream_sync_refuse "cannot determine repository identity for upstream remote '$remote'"
+    return 0
+  fi
+  if ! origin_identity=$(git_repository_identity "$dir" "$origin_url"); then
+    upstream_sync_refuse "cannot determine repository identity for origin"
+    return 0
+  fi
+  if ! origin_push_identity=$(git_repository_identity "$dir" "$origin_push_url"); then
+    upstream_sync_refuse "cannot determine repository identity for origin push destination"
+    return 0
+  fi
+  if [ "$origin_push_identity" != "$origin_identity" ]; then
+    upstream_sync_refuse "origin push destination is not its fetch repository"
+    return 0
+  fi
+  if [ "$upstream_identity" = "$origin_identity" ]; then
     upstream_sync_refuse "upstream remote '$remote' and origin are the same repository"
     return 0
   fi
@@ -317,6 +456,33 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
     upstream_sync_refuse "cannot determine the default branch"
     return 0
   }
+
+  if ! origin_default=$(remote_advertised_default_branch "$dir" origin); then
+    upstream_sync_refuse "cannot determine origin advertised default branch"
+    return 0
+  fi
+  remote_head=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$remote_head" ] && [ "${remote_head#origin/}" != "$origin_default" ]; then
+    upstream_sync_refuse "cached origin default branch ${remote_head#origin/} does not match advertised default branch $origin_default"
+    return 0
+  fi
+  if [ "$default" != "$origin_default" ]; then
+    upstream_sync_refuse "origin default branch $origin_default does not match local default branch $default"
+    return 0
+  fi
+  if ! upstream_default=$(remote_advertised_default_branch "$dir" "$remote"); then
+    upstream_sync_refuse "cannot determine '$remote' advertised default branch"
+    return 0
+  fi
+  remote_head=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
+  if [ -n "$remote_head" ] && [ "${remote_head#"$remote"/}" != "$upstream_default" ]; then
+    upstream_sync_refuse "cached '$remote' default branch ${remote_head#"$remote"/} does not match advertised default branch $upstream_default"
+    return 0
+  fi
+  if [ "$upstream_default" != "$origin_default" ]; then
+    upstream_sync_refuse "'$remote' default branch $upstream_default does not match origin default branch $origin_default"
+    return 0
+  fi
 
   if ! fetch_once "$dir"; then
     upstream_sync_refuse "fetch from origin failed"
@@ -327,13 +493,6 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
     return 0
   fi
 
-  # The upstream must publish the SAME default branch this home follows.
-  # A different upstream HEAD is a topology decision, not a branch to guess.
-  remote_head=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
-  if [ -n "$remote_head" ] && [ "${remote_head#"$remote"/}" != "$default" ]; then
-    upstream_sync_refuse "'$remote' default branch ${remote_head#"$remote"/} does not match origin default branch $default"
-    return 0
-  fi
   if ! upstream_rev=$(git -C "$dir" rev-parse --verify --quiet "refs/remotes/$remote/$default^{commit}"); then
     upstream_sync_refuse "'$remote' has no $default branch"
     return 0

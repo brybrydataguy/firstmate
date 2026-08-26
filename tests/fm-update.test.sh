@@ -518,7 +518,7 @@ test_fork_secondmate_propagation() {
 # upstream declaration degrades to the classic single-remote update instead of
 # pushing somewhere unintended.
 test_fork_ambiguous_topology_refused() {
-  local w out
+  local w out fork_before sink_before
   w=$(new_fork_world f7)
   bump_fork "$w" one
 
@@ -542,11 +542,32 @@ test_fork_ambiguous_topology_refused() {
   out=$(run_update "$w")
   assert_contains "$out" "must be a single git remote name" "a multi-token value is refused"
 
-  git -C "$w/main" remote add twin "$w/fork.git"
+  git -C "$w/main" remote add twin "file://$w/fork.git"
   printf 'twin\n' > "$w/home/config/upstream-remote"
   out=$(run_update "$w")
   assert_contains "$out" "upstream-sync: refused: upstream remote 'twin' and origin are the same repository" \
     "an upstream that is the fork itself is refused"
+
+  w=$(new_fork_world f7-push)
+  git init -q --bare "$w/sink.git"
+  git -C "$w/sink.git" symbolic-ref HEAD refs/heads/main
+  git -C "$w/upstream-seed" push -q "$w/sink.git" main
+  bump_upstream "$w" one
+  fork_before=$(published_head "$w/fork.git")
+  sink_before=$(published_head "$w/sink.git")
+  git -C "$w/main" remote set-url --add --push origin "$w/sink.git"
+  out=$(run_update "$w")
+  assert_contains "$out" "upstream-sync: refused: origin push destination is not its fetch repository" \
+    "a distinct origin push destination is refused"
+  [ "$(published_head "$w/fork.git")" = "$fork_before" ] || fail "the fork moved through a mismatched push destination"
+  [ "$(published_head "$w/sink.git")" = "$sink_before" ] || fail "a mismatched push destination received upstream"
+
+  git -C "$w/main" remote set-url --add --push origin "$w/fork.git"
+  out=$(run_update "$w")
+  assert_contains "$out" "upstream-sync: refused: origin has multiple push destinations" \
+    "multiple origin push destinations are refused"
+  [ "$(published_head "$w/fork.git")" = "$fork_before" ] || fail "the fork moved through multiple push destinations"
+  [ "$(published_head "$w/sink.git")" = "$sink_before" ] || fail "one of multiple push destinations received upstream"
   pass "F7 ambiguous upstream topology is refused rather than guessed"
 }
 
@@ -554,20 +575,21 @@ test_fork_ambiguous_topology_refused() {
 test_fork_upstream_default_branch_mismatch_refused() {
   local w out fork_before
   w=$(new_fork_world f8)
+  git -C "$w/main" fetch -q upstream
+  git -C "$w/main" remote set-head upstream main >/dev/null 2>&1
+  bump_upstream "$w" one
   git -C "$w/upstream-seed" checkout -q -b trunk
   printf 'trunk\n' >> "$w/upstream-seed/README.md"
   git -C "$w/upstream-seed" add -A
   git -C "$w/upstream-seed" commit -qm trunk-work
   git -C "$w/upstream-seed" push -q origin trunk
   git -C "$w/upstream.git" symbolic-ref HEAD refs/heads/trunk
-  git -C "$w/main" fetch -q upstream
-  git -C "$w/main" remote set-head upstream trunk >/dev/null 2>&1
   fork_before=$(published_head "$w/fork.git")
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "upstream-sync: refused: 'upstream' default branch trunk does not match origin default branch main" \
-    "a mismatched upstream default branch is refused"
+  assert_contains "$out" "upstream-sync: refused: cached 'upstream' default branch main does not match advertised default branch trunk" \
+    "a stale cached upstream default branch is refused"
   [ "$(published_head "$w/fork.git")" = "$fork_before" ] || fail "the fork moved on a topology mismatch"
   pass "F8 a mismatched upstream default branch is refused"
 }
