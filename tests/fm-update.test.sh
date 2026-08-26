@@ -518,7 +518,7 @@ test_fork_secondmate_propagation() {
 # upstream declaration degrades to the classic single-remote update instead of
 # pushing somewhere unintended.
 test_fork_ambiguous_topology_refused() {
-  local w out fork_before sink_before
+  local w out fork_before sink_before fakebin real_git upstream_head
   w=$(new_fork_world f7)
   bump_fork "$w" one
 
@@ -568,6 +568,34 @@ test_fork_ambiguous_topology_refused() {
     "multiple origin push destinations are refused"
   [ "$(published_head "$w/fork.git")" = "$fork_before" ] || fail "the fork moved through multiple push destinations"
   [ "$(published_head "$w/sink.git")" = "$sink_before" ] || fail "one of multiple push destinations received upstream"
+
+  w=$(new_fork_world f7-race)
+  git init -q --bare "$w/sink.git"
+  git -C "$w/sink.git" symbolic-ref HEAD refs/heads/main
+  git -C "$w/upstream-seed" push -q "$w/sink.git" main
+  bump_upstream "$w" one
+  upstream_head=$(published_head "$w/upstream.git")
+  sink_before=$(published_head "$w/sink.git")
+  fakebin=$(fm_fakebin "$w/race")
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_REPO" ] &&
+  [ "${3:-}" = push ] && [ "${4:-}" = origin ]; then
+  "$FM_TEST_REAL_GIT" -C "$FM_TEST_RACE_REPO" config --replace-all \
+    remote.origin.pushurl "$FM_TEST_RACE_SINK"
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_REAL_GIT="$real_git" \
+    FM_TEST_RACE_REPO="$w/main" FM_TEST_RACE_SINK="$w/sink.git" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null)
+  assert_contains "$out" "upstream-sync: synced origin/main " \
+    "the push stays bound to the validated destination"
+  [ "$(published_head "$w/fork.git")" = "$upstream_head" ] || fail "the validated fork did not receive upstream"
+  [ "$(published_head "$w/sink.git")" = "$sink_before" ] || fail "a concurrent pushurl received upstream"
   pass "F7 ambiguous upstream topology is refused rather than guessed"
 }
 
@@ -591,6 +619,25 @@ test_fork_upstream_default_branch_mismatch_refused() {
   assert_contains "$out" "upstream-sync: refused: cached 'upstream' default branch main does not match advertised default branch trunk" \
     "a stale cached upstream default branch is refused"
   [ "$(published_head "$w/fork.git")" = "$fork_before" ] || fail "the fork moved on a topology mismatch"
+
+  w=$(new_fork_world f8-uncached)
+  git -C "$w/main" config remote.upstream.followRemoteHEAD never
+  bump_upstream "$w" one
+  git -C "$w/upstream-seed" checkout -q -b trunk
+  printf 'trunk\n' >> "$w/upstream-seed/README.md"
+  git -C "$w/upstream-seed" add -A
+  git -C "$w/upstream-seed" commit -qm trunk-work
+  git -C "$w/upstream-seed" push -q origin trunk
+  git -C "$w/upstream.git" symbolic-ref HEAD refs/heads/trunk
+  git -C "$w/main" symbolic-ref --quiet refs/remotes/upstream/HEAD >/dev/null 2>&1 \
+    && fail "fixture unexpectedly cached upstream HEAD"
+  fork_before=$(published_head "$w/fork.git")
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-sync: refused: 'upstream' default branch trunk does not match origin default branch main" \
+    "an uncached mismatched upstream default branch is refused"
+  [ "$(published_head "$w/fork.git")" = "$fork_before" ] || fail "the fork moved on an uncached topology mismatch"
   pass "F8 a mismatched upstream default branch is refused"
 }
 

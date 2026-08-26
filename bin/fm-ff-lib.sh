@@ -525,7 +525,7 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
   after=$(git -C "$dir" rev-parse --short "$upstream_rev")
   # No force, no lease, no leading '+': the receiving repository is what refuses
   # a non-fast-forward, so a topology that changed under us cannot be overwritten.
-  if ! out=$(git -C "$dir" push origin "$upstream_rev:refs/heads/$default" 2>&1); then
+  if ! out=$(git -C "$dir" push -- "$origin_push_url" "$upstream_rev:refs/heads/$default" 2>&1); then
     upstream_sync_refuse "fast-forward push of $remote/$default onto origin/$default failed: $(first_line "$out")"
     return 0
   fi
