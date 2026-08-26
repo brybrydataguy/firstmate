@@ -661,6 +661,24 @@ SH
     "a failed fork refresh forces the guarded home fetch to retry"
   [ "$(published_head "$w/fork.git")" = "$upstream_head" ] || fail "the fork did not receive upstream before refresh failed"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$home_before" ] || fail "the home moved without a successful fork refresh"
+
+  w=$(new_fork_world f7-relative)
+  git init -q --bare "$w/sink.git"
+  git -C "$w/sink.git" symbolic-ref HEAD refs/heads/main
+  git -C "$w/upstream-seed" push -q "$w/sink.git" main
+  git clone -q --bare "$w/fork.git" "$w/main/fork.git"
+  git -C "$w/main" remote set-url origin fork.git
+  git -C "$w/main" remote add fork.git "$w/sink.git"
+  bump_upstream "$w" one
+  upstream_head=$(published_head "$w/upstream.git")
+  sink_before=$(published_head "$w/sink.git")
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-sync: synced origin/main " \
+    "a relative local URL stays bound to its validated path"
+  [ "$(published_head "$w/main/fork.git")" = "$upstream_head" ] || fail "the validated relative-path fork did not receive upstream"
+  [ "$(published_head "$w/sink.git")" = "$sink_before" ] || fail "a same-named remote received the relative-path push"
   pass "F7 ambiguous upstream topology is refused rather than guessed"
 }
 
