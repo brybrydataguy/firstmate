@@ -354,7 +354,10 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
-The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+A home may also follow a personal fork as `origin` while an authoritative upstream stays a second remote, in which case the same helper first lands the upstream default branch on that fork by a fast-forward push, and the home then advances to the fork's merged custom head through the unchanged origin path.
+That reconciliation is the only outbound write any sync path performs, it runs from `/updatefirstmate` alone rather than from startup or spawn convergence, and it carries no force, no merge, and no rewrite, so the receiving repository is what enforces the fast-forward.
+Real divergence between the two remotes is a merge decision made in the fork's own review lane, and it, an ambiguous remote declaration, and a mismatched upstream default branch are all reported refusals that leave both published branches unchanged while the home's own guarded advance still runs.
+The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update), while [configuration.md](configuration.md#self-update-remotes-configupstream-remote) owns the operator-facing fork topology and its refusal list.
 
 ## Restart-proof
 

@@ -20,9 +20,17 @@
 # the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
 # fm-bootstrap.sh, so there is one ff implementation, not several.
 #
+# When config/upstream-remote names an authoritative upstream, this run first
+# lands that upstream's default branch on this home's fork (origin) by a
+# fast-forward push, so the home then advances to the fork's merged custom head
+# instead of to upstream directly. That reconciliation, its refusals, and its
+# one status line are owned by the same library; an absent config file keeps the
+# classic single-remote behavior, and this is the only caller that performs it.
+#
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
+#   - one "upstream-sync: ..." line for the fork reconciliation
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
@@ -34,6 +42,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
@@ -47,6 +56,13 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 [ $# -eq 0 ] || { usage; exit 1; }
+
+# --- upstream -> fork reconciliation ---------------------------------------
+# Runs first so the fork already carries upstream before this home advances to
+# it. A refusal here is reported and does not stop the home's own guarded
+# fast-forward, which only ever advances it to the fork's own head.
+
+sync_upstream_into_fork "$FM_ROOT" "$CONFIG"
 
 # --- main firstmate repo ---------------------------------------------------
 

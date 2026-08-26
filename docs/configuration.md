@@ -252,6 +252,37 @@ This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
 A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
 
+## Self-update remotes (config/upstream-remote)
+
+By default a home pulls firstmate's shared changes straight from `origin`, and `/updatefirstmate` only ever fast-forwards it.
+A home that keeps its own custom firstmate changes needs somewhere to review and land them, so it can follow a personal **fork** as `origin` while the authoritative repository stays a second remote.
+The local, gitignored `config/upstream-remote` file turns that topology on by naming the authoritative remote, for example:
+
+```sh
+git remote set-url origin https://github.com/<you>/firstmate      # the fork: your landing lane
+git remote add upstream https://github.com/<them>/firstmate       # the authoritative source
+printf 'upstream\n' > config/upstream-remote
+```
+
+Only the first non-empty, non-comment line is read, and it must be a single configured git remote **name**, never a URL or path.
+An absent, empty, or comment-only file keeps the classic single-remote update exactly as before, so the fork lane ships inert and nothing is ever pushed until you configure it.
+
+With it configured, `/updatefirstmate` first lands the upstream's default branch on your fork by a fast-forward push, then runs the ordinary fast-forward of this home to the fork's own head - so the home ends up on the fork's merged custom work, not on upstream directly.
+Everything in that reconciliation is fast-forward or nothing: no force, no rebase, no rewrite, and the receiving repository is what enforces it.
+The run reports exactly one outcome for the reconciliation - already current, the fork already ahead with its own merged work, a completed sync, or a refusal with its reason - and refusals leave both published branches exactly where they were.
+
+The reconciliation refuses rather than guesses whenever:
+
+- The fork and the upstream have each landed commits the other lacks.
+  Reconciling that is a merge decision, made by opening a pull request in the fork that merges the upstream branch; a fast-forward push cannot express it.
+- The configured value does not name an existing remote, names `origin` itself, is a URL or path, carries more than one token, or names a remote pointing at the same repository as `origin`.
+- The upstream publishes a different default branch than this home follows, or either side has no such branch.
+
+A refusal is reported and does not stop this home from advancing: its own update stays independently fast-forward-only, so it can still move to the fork's head while the reconciliation waits for you.
+Dirty or unlanded local work still stops that advance, with the work left untouched, exactly as it does without a fork.
+Secondmate homes need no setting of their own - they follow whatever commit lands in the fork - so this file is per home and is not inherited.
+[`bin/fm-ff-lib.sh`](../bin/fm-ff-lib.sh) owns the reconciliation mechanics, and the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md) owns what firstmate does with the result.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.

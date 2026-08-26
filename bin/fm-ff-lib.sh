@@ -10,6 +10,11 @@
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
 #
+# It also owns the one upstream-into-fork reconciliation that runs BEFORE the
+# origin fast-forward when a home follows a personal fork; see the
+# "upstream -> fork reconciliation" section below. Only /updatefirstmate calls
+# it, so no startup or spawn sync path ever pushes anything.
+#
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
 # never touches the network. A standalone clone moves through that path only when
@@ -207,6 +212,169 @@ fetch_once() {
     return 0
   fi
   return 1
+}
+
+# --- upstream -> fork reconciliation ---------------------------------------
+# A home may follow a personal FORK as `origin` (the reviewable landing lane for
+# its own custom commits) while an authoritative UPSTREAM repository stays the
+# source of shared firstmate changes. In that topology the home cannot simply
+# fast-forward to upstream: its custom commits live on the fork, and only the
+# fork's merged head is what the home should run. So `/updatefirstmate` first
+# lands upstream's default branch on the fork by a fast-forward push, and only
+# then runs the ordinary origin fast-forward of the home itself.
+#
+# Everything here is fast-forward or nothing. There is no force, no lease, no
+# refspec `+`, no merge, no rebase, and no rewrite: the push carries the exact
+# upstream commit to `refs/heads/<default>` on `origin` and lets the receiving
+# repository refuse it when it would not be a fast-forward. Real divergence -
+# both sides carrying commits the other lacks - is a human merge decision made
+# in the fork's own review lane, so it is refused and reported, never guessed
+# at. Ambiguous topology (an unconfigured or self-referential upstream remote, a
+# non-remote value, a mismatched upstream default branch, a missing branch on
+# either side) is refused for the same reason.
+#
+# A refusal is a reported skip, exactly like every other skip in this library:
+# the home's own guarded fast-forward still runs afterwards and can still
+# advance the home to the fork's own head, because that advance is independently
+# ff-only and never reconciles the fork.
+
+# The configured upstream remote NAME for this home, or non-zero when the
+# fork topology is not configured. Reads the first non-empty, non-comment line
+# of <config-dir>/upstream-remote; an absent, empty, or comment-only file means
+# the classic single-remote update, so nothing is ever pushed by default.
+fm_upstream_remote_name() {  # <config-dir>
+  local file=$1/upstream-remote line trimmed
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -n "$trimmed" ] || continue
+    case "$trimmed" in '#'*) continue ;; esac
+    printf '%s\n' "$trimmed"
+    return 0
+  done < "$file"
+  return 1
+}
+
+upstream_sync_refuse() {
+  echo "upstream-sync: refused: $1"
+}
+
+# Land the configured upstream's default branch on this home's fork by a
+# fast-forward push. The one printed line IS the contract, in the same
+# "<label>: <outcome>" shape every other target here uses:
+#   upstream-sync: not configured
+#   upstream-sync: already current
+#   upstream-sync: fork ahead of <remote>/<branch> by <n> commit(s)
+#   upstream-sync: synced origin/<branch> <before>..<after> from <remote>/<branch>
+#   upstream-sync: refused: <reason>
+# Always returns 0: like every other target here, an unsafe or ambiguous state
+# is a reported skip rather than a failed run.
+sync_upstream_into_fork() {  # <repo-dir> <config-dir>
+  local dir=$1 config_dir=$2
+  local remote default remote_head upstream_url origin_url
+  local upstream_rev origin_rev before after ahead out
+
+  if ! remote=$(fm_upstream_remote_name "$config_dir"); then
+    echo "upstream-sync: not configured"
+    return 0
+  fi
+
+  # The value names one configured git remote. A URL, a path, or several tokens
+  # is ambiguous topology: refuse rather than guess which repository to push to.
+  case "$remote" in
+    *[[:space:]]*)
+      upstream_sync_refuse "upstream value '$remote' must be a single git remote name"
+      return 0
+      ;;
+    -*|*/*|*:*)
+      upstream_sync_refuse "upstream value '$remote' must name a configured git remote, not a URL or path"
+      return 0
+      ;;
+  esac
+
+  if [ ! -d "$dir" ] || ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    upstream_sync_refuse "firstmate repo is not a git repo"
+    return 0
+  fi
+  if [ "$remote" = origin ]; then
+    upstream_sync_refuse "upstream remote '$remote' is the fork remote origin"
+    return 0
+  fi
+  if ! upstream_url=$(git -C "$dir" remote get-url "$remote" 2>/dev/null); then
+    upstream_sync_refuse "upstream remote '$remote' is not configured"
+    return 0
+  fi
+  if ! origin_url=$(git -C "$dir" remote get-url origin 2>/dev/null); then
+    upstream_sync_refuse "no origin remote to land '$remote' on"
+    return 0
+  fi
+  if [ "$upstream_url" = "$origin_url" ]; then
+    upstream_sync_refuse "upstream remote '$remote' and origin are the same repository"
+    return 0
+  fi
+
+  default=$(default_branch "$dir") || {
+    upstream_sync_refuse "cannot determine the default branch"
+    return 0
+  }
+
+  if ! fetch_once "$dir"; then
+    upstream_sync_refuse "fetch from origin failed"
+    return 0
+  fi
+  if ! git -C "$dir" fetch "$remote" --prune --quiet 2>/dev/null; then
+    upstream_sync_refuse "fetch from '$remote' failed"
+    return 0
+  fi
+
+  # The upstream must publish the SAME default branch this home follows.
+  # A different upstream HEAD is a topology decision, not a branch to guess.
+  remote_head=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
+  if [ -n "$remote_head" ] && [ "${remote_head#"$remote"/}" != "$default" ]; then
+    upstream_sync_refuse "'$remote' default branch ${remote_head#"$remote"/} does not match origin default branch $default"
+    return 0
+  fi
+  if ! upstream_rev=$(git -C "$dir" rev-parse --verify --quiet "refs/remotes/$remote/$default^{commit}"); then
+    upstream_sync_refuse "'$remote' has no $default branch"
+    return 0
+  fi
+  if ! origin_rev=$(git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/$default^{commit}"); then
+    upstream_sync_refuse "origin has no $default branch"
+    return 0
+  fi
+
+  if [ "$upstream_rev" = "$origin_rev" ]; then
+    echo "upstream-sync: already current"
+    return 0
+  fi
+  # The fork already contains upstream plus its own merged custom commits.
+  # There is nothing to push, and the home still advances to that custom head.
+  if git -C "$dir" merge-base --is-ancestor "$upstream_rev" "$origin_rev" 2>/dev/null; then
+    ahead=$(git -C "$dir" rev-list --count "$upstream_rev..$origin_rev" 2>/dev/null || true)
+    echo "upstream-sync: fork ahead of $remote/$default by ${ahead:-?} commit(s)"
+    return 0
+  fi
+  # Both sides hold commits the other lacks. Reconciling that needs a merge in
+  # the fork's review lane; a fast-forward push cannot express it and a forced
+  # one would replace the fork's history, so refuse and report.
+  if ! git -C "$dir" merge-base --is-ancestor "$origin_rev" "$upstream_rev" 2>/dev/null; then
+    upstream_sync_refuse "origin/$default and $remote/$default have diverged; land $remote/$default in the fork with a merge"
+    return 0
+  fi
+
+  before=$(git -C "$dir" rev-parse --short "$origin_rev")
+  after=$(git -C "$dir" rev-parse --short "$upstream_rev")
+  # No force, no lease, no leading '+': the receiving repository is what refuses
+  # a non-fast-forward, so a topology that changed under us cannot be overwritten.
+  if ! out=$(git -C "$dir" push origin "$upstream_rev:refs/heads/$default" 2>&1); then
+    upstream_sync_refuse "fast-forward push of $remote/$default onto origin/$default failed: $(first_line "$out")"
+    return 0
+  fi
+  # Refresh origin/<default> so the home's own fast-forward sees the landed
+  # commit; fetch_once already marked this object store, so nothing else refetches.
+  git -C "$dir" fetch origin --prune --quiet 2>/dev/null || true
+  echo "upstream-sync: synced origin/$default $before..$after from $remote/$default"
+  return 0
 }
 
 # Which watched instruction paths changed between HEAD and BASE (comma list).
