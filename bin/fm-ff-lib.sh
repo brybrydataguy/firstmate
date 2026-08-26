@@ -199,6 +199,18 @@ validate_secondmate_home() {
 # each distinct git-common-dir at most once. Used ONLY by the origin base mode;
 # the local-HEAD sync never fetches.
 FETCHED=""
+FETCH_ORIGIN_URL=""
+FETCH_ORIGIN_BRANCH=""
+fetch_origin_now() {
+  local dir=$1
+  if [ -n "$FETCH_ORIGIN_URL" ] && [ -n "$FETCH_ORIGIN_BRANCH" ]; then
+    git -C "$dir" fetch --no-tags --quiet "$FETCH_ORIGIN_URL" \
+      "refs/heads/$FETCH_ORIGIN_BRANCH:refs/remotes/origin/$FETCH_ORIGIN_BRANCH" 2>/dev/null
+  else
+    git -C "$dir" fetch origin --prune --quiet 2>/dev/null
+  fi
+}
+
 fetch_once() {
   local dir=$1 common
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
@@ -207,7 +219,7 @@ fetch_once() {
       *" $common "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
+  if fetch_origin_now "$dir"; then
     [ -n "$common" ] && FETCHED="$FETCHED $common"
     return 0
   fi
@@ -282,6 +294,7 @@ git_network_repository_identity() {
 
 git_repository_identity() {
   local dir=$1 url=$2 rest scheme authority hostport host port path
+  case "$url" in -*) return 1 ;; esac
   case "$url" in
     file://*)
       rest=${url#file://}
@@ -340,8 +353,8 @@ git_repository_identity() {
 }
 
 remote_advertised_default_branch() {
-  local dir=$1 remote=$2 out branch
-  out=$(git -C "$dir" ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
+  local dir=$1 target=$2 out branch
+  out=$(git -C "$dir" ls-remote --symref -- "$target" HEAD 2>/dev/null) || return 1
   branch=$(printf '%s\n' "$out" |
     sed -n 's/^ref: refs\/heads\/\([^[:space:]]*\)[[:space:]]\{1,\}HEAD$/\1/p')
   [ -n "$branch" ] || return 1
@@ -369,7 +382,10 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
   local remote default origin_default upstream_default remote_head
   local upstream_urls origin_urls origin_push_urls upstream_url origin_url origin_push_url
   local upstream_identity origin_identity origin_push_identity
-  local upstream_rev origin_rev before after ahead out
+  local upstream_rev origin_rev refreshed_rev before after ahead out
+
+  FETCH_ORIGIN_URL=""
+  FETCH_ORIGIN_BRANCH=""
 
   if ! remote=$(fm_upstream_remote_name "$config_dir"); then
     echo "upstream-sync: not configured"
@@ -457,7 +473,7 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
     return 0
   }
 
-  if ! origin_default=$(remote_advertised_default_branch "$dir" origin); then
+  if ! origin_default=$(remote_advertised_default_branch "$dir" "$origin_url"); then
     upstream_sync_refuse "cannot determine origin advertised default branch"
     return 0
   fi
@@ -470,7 +486,10 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
     upstream_sync_refuse "origin default branch $origin_default does not match local default branch $default"
     return 0
   fi
-  if ! upstream_default=$(remote_advertised_default_branch "$dir" "$remote"); then
+  FETCH_ORIGIN_URL=$origin_url
+  FETCH_ORIGIN_BRANCH=$default
+  FETCHED=""
+  if ! upstream_default=$(remote_advertised_default_branch "$dir" "$upstream_url"); then
     upstream_sync_refuse "cannot determine '$remote' advertised default branch"
     return 0
   fi
@@ -488,7 +507,8 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
     upstream_sync_refuse "fetch from origin failed"
     return 0
   fi
-  if ! git -C "$dir" fetch "$remote" --prune --quiet 2>/dev/null; then
+  if ! git -C "$dir" fetch --no-tags --quiet "$upstream_url" \
+    "refs/heads/$default:refs/remotes/$remote/$default" 2>/dev/null; then
     upstream_sync_refuse "fetch from '$remote' failed"
     return 0
   fi
@@ -529,9 +549,12 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
     upstream_sync_refuse "fast-forward push of $remote/$default onto origin/$default failed: $(first_line "$out")"
     return 0
   fi
-  # Refresh origin/<default> so the home's own fast-forward sees the landed
-  # commit; fetch_once already marked this object store, so nothing else refetches.
-  git -C "$dir" fetch origin --prune --quiet 2>/dev/null || true
+  # Refresh origin/<default> so the home's own fast-forward sees the landed commit.
+  if ! fetch_origin_now "$dir" ||
+    ! refreshed_rev=$(git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/$default^{commit}") ||
+    [ "$refreshed_rev" != "$upstream_rev" ]; then
+    FETCHED=""
+  fi
   echo "upstream-sync: synced origin/$default $before..$after from $remote/$default"
   return 0
 }

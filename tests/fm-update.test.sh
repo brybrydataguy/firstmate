@@ -518,7 +518,7 @@ test_fork_secondmate_propagation() {
 # upstream declaration degrades to the classic single-remote update instead of
 # pushing somewhere unintended.
 test_fork_ambiguous_topology_refused() {
-  local w out fork_before sink_before fakebin real_git upstream_head
+  local w out fork_before sink_before fakebin real_git upstream_head attacker_head home_before marker
   w=$(new_fork_world f7)
   bump_fork "$w" one
 
@@ -596,6 +596,71 @@ SH
     "the push stays bound to the validated destination"
   [ "$(published_head "$w/fork.git")" = "$upstream_head" ] || fail "the validated fork did not receive upstream"
   [ "$(published_head "$w/sink.git")" = "$sink_before" ] || fail "a concurrent pushurl received upstream"
+
+  w=$(new_fork_world f7-upstream-race)
+  git init -q --bare "$w/attacker.git"
+  git -C "$w/attacker.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$w/fork.git" "$w/attacker-seed"
+  printf 'unvalidated\n' >> "$w/attacker-seed/README.md"
+  git -C "$w/attacker-seed" add -A
+  git -C "$w/attacker-seed" commit -qm unvalidated
+  git -C "$w/attacker-seed" push -q "$w/attacker.git" main
+  attacker_head=$(published_head "$w/attacker.git")
+  bump_upstream "$w" one
+  upstream_head=$(published_head "$w/upstream.git")
+  fakebin=$(fm_fakebin "$w/upstream-race")
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_REPO" ] &&
+  [ "${3:-}" = fetch ] && [ "${4:-}" = upstream ]; then
+  "$FM_TEST_REAL_GIT" -C "$FM_TEST_RACE_REPO" config --replace-all \
+    remote.upstream.url "$FM_TEST_RACE_ATTACKER"
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_REAL_GIT="$real_git" \
+    FM_TEST_RACE_REPO="$w/main" FM_TEST_RACE_ATTACKER="$w/attacker.git" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null)
+  assert_contains "$out" "upstream-sync: synced origin/main " \
+    "upstream reads stay bound to the validated repository"
+  [ "$(published_head "$w/fork.git")" = "$upstream_head" ] || fail "the fork did not receive the authoritative upstream"
+  [ "$(published_head "$w/fork.git")" != "$attacker_head" ] || fail "the fork received an unvalidated upstream"
+
+  w=$(new_fork_world f7-refresh)
+  bump_upstream "$w" one
+  upstream_head=$(published_head "$w/upstream.git")
+  home_before=$(git -C "$w/main" rev-parse HEAD)
+  fakebin=$(fm_fakebin "$w/refresh")
+  real_git=$(command -v git)
+  marker="$w/after-push"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_REPO" ] &&
+  [ "${3:-}" = fetch ] && [ -f "$FM_TEST_RACE_MARKER" ]; then
+  exit 1
+fi
+"$FM_TEST_REAL_GIT" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_REPO" ] &&
+  [ "${3:-}" = push ]; then
+  : > "$FM_TEST_RACE_MARKER"
+fi
+exit "$rc"
+SH
+  chmod +x "$fakebin/git"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_REAL_GIT="$real_git" \
+    FM_TEST_RACE_REPO="$w/main" FM_TEST_RACE_MARKER="$marker" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null)
+  assert_contains "$out" "upstream-sync: synced origin/main " \
+    "the fork push succeeds before a refresh failure"
+  assert_contains "$out" "firstmate: skipped: fetch failed" \
+    "a failed fork refresh forces the guarded home fetch to retry"
+  [ "$(published_head "$w/fork.git")" = "$upstream_head" ] || fail "the fork did not receive upstream before refresh failed"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$home_before" ] || fail "the home moved without a successful fork refresh"
   pass "F7 ambiguous upstream topology is refused rather than guessed"
 }
 
