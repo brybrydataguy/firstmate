@@ -371,7 +371,13 @@ git_repository_target() {
       esac
       git_local_repository_target "$dir" "$path"
       ;;
-    *://*|*:*)
+    *://*)
+      printf '%s\n' "$url"
+      ;;
+    ./*|../*|/*)
+      git_local_repository_target "$dir" "$url"
+      ;;
+    *:*)
       printf '%s\n' "$url"
       ;;
     *)

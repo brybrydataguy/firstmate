@@ -679,6 +679,36 @@ SH
     "a relative local URL stays bound to its validated path"
   [ "$(published_head "$w/main/fork.git")" = "$upstream_head" ] || fail "the validated relative-path fork did not receive upstream"
   [ "$(published_head "$w/sink.git")" = "$sink_before" ] || fail "a same-named remote received the relative-path push"
+
+  w=$(new_fork_world f7-colon-path)
+  git clone -q --bare "$w/fork.git" "$w/main/fork:repo"
+  printf 'fork:repo/\n' >> "$w/main/.git/info/exclude"
+  git -C "$w/main" remote set-url origin ./fork:repo
+  git clone -q "$w/main/fork:repo" "$w/sm1"
+  printf 'sm1\n' > "$w/sm1/.fm-secondmate-home"
+  printf 'fork:repo/\n' >> "$w/sm1/.git/info/exclude"
+  {
+    printf 'window=main:fm-sm1\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s\n' "$w/sm1"
+  } > "$w/home/state/sm1.meta"
+  git clone -q --bare "$w/fork.git" "$w/sm1/fork:repo"
+  git clone -q "$w/fork.git" "$w/attacker-seed"
+  printf 'unvalidated\n' >> "$w/attacker-seed/README.md"
+  git -C "$w/attacker-seed" add -A
+  git -C "$w/attacker-seed" commit -qm unvalidated
+  git -C "$w/attacker-seed" push -q "$w/sm1/fork:repo" main
+  attacker_head=$(published_head "$w/sm1/fork:repo")
+  bump_upstream "$w" one
+  upstream_head=$(published_head "$w/upstream.git")
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: updated " \
+    "a standalone secondmate follows the canonical primary fork path"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$upstream_head" ] || fail "the primary did not receive authoritative upstream"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$upstream_head" ] || fail "the standalone secondmate did not receive authoritative upstream"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" != "$attacker_head" ] || fail "the standalone secondmate followed its own relative colon path"
   pass "F7 ambiguous upstream topology is refused rather than guessed"
 }
 
