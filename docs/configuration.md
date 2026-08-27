@@ -260,7 +260,7 @@ The local, gitignored `config/upstream-remote` file turns that topology on by na
 
 ```sh
 git remote set-url origin https://github.com/<you>/firstmate      # the fork: your landing lane
-git remote add upstream https://github.com/<them>/firstmate       # the authoritative source
+git remote add upstream https://github.com/kunchenguid/firstmate  # the authoritative source
 printf 'upstream\n' > config/upstream-remote
 ```
 
@@ -268,19 +268,24 @@ Only the first non-empty, non-comment line is read, and it must be a single conf
 An absent, empty, or comment-only file keeps the classic single-remote update exactly as before, so the fork lane ships inert and nothing is ever pushed until you configure it.
 
 With it configured, `/updatefirstmate` first lands the upstream's default branch on your fork by a fast-forward push, then runs the ordinary fast-forward of this home to the fork's own head - so the home ends up on the fork's merged custom work, not on upstream directly.
-Everything in that reconciliation is fast-forward or nothing: no force, no rebase, no rewrite, and the receiving repository is what enforces it.
-The run reports exactly one outcome for the reconciliation - already current, the fork already ahead with its own merged work, a completed sync, or a refusal with its reason - and refusals leave both published branches exactly where they were.
+Only `/updatefirstmate` performs this reconciliation; startup and spawn convergence use the same fast-forward helper but never invoke this push path.
+The reconciliation is one plain Git push with no GitHub API call, no force, no lease, no leading `+` refspec, no merge, no rebase, and no rewrite, so the receiving repository enforces the fast-forward.
+The run reports exactly one `upstream-sync:` outcome for the reconciliation.
+`not configured`, `already current`, `fork ahead ...`, and `synced ...` are healthy outcomes that need no intervention.
+`refused: <reason>` needs operator attention, but leaves both published branches exactly where they were and never authorizes a force, rebase, history rewrite, or hand-push around the refusal.
 
 The reconciliation refuses rather than guesses whenever:
 
 - The fork and the upstream have each landed commits the other lacks.
   Reconciling that is a merge decision, made by opening a pull request in the fork that merges the upstream branch; a fast-forward push cannot express it.
-- The configured value does not name an existing remote, names `origin` itself, is a URL or path, carries more than one token, or names a remote pointing at the same repository as `origin`.
-- The upstream publishes a different default branch than this home follows, or either side has no such branch.
+- The configured value does not name an existing remote, names `origin` itself, is a URL or path, or carries more than one token.
+- Either remote has multiple fetch URLs, `origin` has multiple push destinations, its push destination is not the same repository as its fetch URL, either repository identity cannot be resolved unambiguously, or the upstream remote resolves to the same repository as `origin`.
+- The local default branch, either remote's advertised default branch, or an existing cached remote default branch disagree, or either remote lacks the agreed branch.
 
 A refusal is reported and does not stop this home from advancing: its own update stays independently fast-forward-only, so it can still move to the fork's head while the reconciliation waits for you.
 Dirty or unlanded local work still stops that advance, with the work left untouched, exactly as it does without a fork.
-Secondmate homes need no setting of their own - they follow whatever commit lands in the fork - so this file is per home and is not inherited.
+Local secondmate homes need no setting of their own because they follow whatever commit lands in the primary home's fork, so this file is not inherited.
+A remote secondmate host's shared code root is a separate self-update site and reads its own `config/upstream-remote`; configure the file there too when that host should follow a fork.
 [`bin/fm-ff-lib.sh`](../bin/fm-ff-lib.sh) owns the reconciliation mechanics, and the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md) owns what firstmate does with the result.
 
 ## FM_HOME
