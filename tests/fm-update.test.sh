@@ -548,6 +548,17 @@ test_fork_ambiguous_topology_refused() {
   assert_contains "$out" "upstream-sync: refused: upstream remote 'twin' and origin are the same repository" \
     "an upstream that is the fork itself is refused"
 
+  w=$(new_fork_world f7-common-dir)
+  git clone -q "$w/fork.git" "$w/fork-worktree"
+  git -C "$w/main" remote set-url origin "$w/fork-worktree"
+  git -C "$w/main" remote add twin "$w/fork-worktree/.git"
+  printf 'twin\n' > "$w/home/config/upstream-remote"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-sync: refused: upstream remote 'twin' and origin are the same repository" \
+    "a worktree path and its git directory are the same repository"
+
   w=$(new_fork_world f7-push)
   git init -q --bare "$w/sink.git"
   git -C "$w/sink.git" symbolic-ref HEAD refs/heads/main
@@ -709,6 +720,38 @@ SH
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$upstream_head" ] || fail "the primary did not receive authoritative upstream"
   [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$upstream_head" ] || fail "the standalone secondmate did not receive authoritative upstream"
   [ "$(git -C "$w/sm1" rev-parse HEAD)" != "$attacker_head" ] || fail "the standalone secondmate followed its own relative colon path"
+
+  w=$(new_fork_world f7-slash-colon-path)
+  mkdir -p "$w/main/fork"
+  git clone -q --bare "$w/fork.git" "$w/main/fork/repo:name"
+  printf 'fork/\n' >> "$w/main/.git/info/exclude"
+  git -C "$w/main" remote set-url origin fork/repo:name
+  git clone -q "$w/main/fork/repo:name" "$w/sm1"
+  printf 'sm1\n' > "$w/sm1/.fm-secondmate-home"
+  printf 'fork/\n' >> "$w/sm1/.git/info/exclude"
+  {
+    printf 'window=main:fm-sm1\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s\n' "$w/sm1"
+  } > "$w/home/state/sm1.meta"
+  mkdir -p "$w/sm1/fork"
+  git clone -q --bare "$w/fork.git" "$w/sm1/fork/repo:name"
+  git clone -q "$w/fork.git" "$w/attacker-seed"
+  printf 'unvalidated\n' >> "$w/attacker-seed/README.md"
+  git -C "$w/attacker-seed" add -A
+  git -C "$w/attacker-seed" commit -qm unvalidated
+  git -C "$w/attacker-seed" push -q "$w/sm1/fork/repo:name" main
+  attacker_head=$(published_head "$w/sm1/fork/repo:name")
+  bump_upstream "$w" one
+  upstream_head=$(published_head "$w/upstream.git")
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: updated " \
+    "a slash-before-colon origin stays bound to the primary repository"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$upstream_head" ] || fail "the slash-colon primary did not receive authoritative upstream"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$upstream_head" ] || fail "the slash-colon standalone secondmate did not receive authoritative upstream"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" != "$attacker_head" ] || fail "the standalone secondmate followed its own slash-colon path"
   pass "F7 ambiguous upstream topology is refused rather than guessed"
 }
 

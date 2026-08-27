@@ -267,22 +267,6 @@ fm_upstream_remote_name() {  # <config-dir>
   return 1
 }
 
-git_local_repository_target() {
-  local dir=$1 path=$2 resolved
-  case "$path" in
-    /*) ;;
-    *) path=$dir/$path ;;
-  esac
-  resolved=$(resolved_existing_dir "$path") || return 1
-  printf '%s\n' "$resolved"
-}
-
-git_local_repository_identity() {
-  local dir=$1 path=$2 resolved
-  resolved=$(git_local_repository_target "$dir" "$path") || return 1
-  printf 'local:%s\n' "$resolved"
-}
-
 git_network_repository_identity() {
   local host=$1 port=$2 path=$3
   host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
@@ -298,20 +282,9 @@ git_network_repository_identity() {
   fi
 }
 
-git_repository_identity() {
-  local dir=$1 url=$2 rest scheme authority hostport host port path
-  case "$url" in -*) return 1 ;; esac
+git_network_url_identity() {
+  local url=$1 rest scheme authority hostport host port path
   case "$url" in
-    file://*)
-      rest=${url#file://}
-      case "$rest" in
-        /*) path=$rest ;;
-        localhost/*) path=/${rest#localhost/} ;;
-        *) return 1 ;;
-      esac
-      case "$path" in *%*|*\?*|*\#*) return 1 ;; esac
-      git_local_repository_identity "$dir" "$path"
-      ;;
     *://*)
       scheme=${url%%://*}
       case "$scheme" in http|https|ssh|git) ;; *) return 1 ;; esac
@@ -343,23 +316,22 @@ git_repository_identity() {
       esac
       git_network_repository_identity "$host" "$port" "$path"
       ;;
-    ./*|../*|/*)
-      git_local_repository_identity "$dir" "$url"
-      ;;
     *:*)
       hostport=${url%%:*}
       path=${url#*:}
       host=${hostport##*@}
       git_network_repository_identity "$host" "" "$path"
       ;;
-    *)
-      git_local_repository_identity "$dir" "$url"
-      ;;
+    *) return 1 ;;
   esac
 }
 
-git_repository_target() {
-  local dir=$1 url=$2 rest path
+GIT_REPOSITORY_TARGET=""
+GIT_REPOSITORY_IDENTITY=""
+resolve_git_repository() {
+  local dir=$1 url=$2 rest path prefix common identity
+  GIT_REPOSITORY_TARGET=""
+  GIT_REPOSITORY_IDENTITY=""
   case "$url" in -*) return 1 ;; esac
   case "$url" in
     file://*)
@@ -369,21 +341,38 @@ git_repository_target() {
         localhost/*) path=/${rest#localhost/} ;;
         *) return 1 ;;
       esac
-      git_local_repository_target "$dir" "$path"
+      case "$path" in *%*|*\?*|*\#*) return 1 ;; esac
       ;;
     *://*)
-      printf '%s\n' "$url"
-      ;;
-    ./*|../*|/*)
-      git_local_repository_target "$dir" "$url"
+      identity=$(git_network_url_identity "$url") || return 1
+      GIT_REPOSITORY_TARGET=$url
+      GIT_REPOSITORY_IDENTITY=$identity
+      return 0
       ;;
     *:*)
-      printf '%s\n' "$url"
+      prefix=${url%%:*}
+      case "$prefix" in
+        */*) path=$url ;;
+        *)
+          identity=$(git_network_url_identity "$url") || return 1
+          GIT_REPOSITORY_TARGET=$url
+          GIT_REPOSITORY_IDENTITY=$identity
+          return 0
+          ;;
+      esac
       ;;
-    *)
-      git_local_repository_target "$dir" "$url"
-      ;;
+    *) path=$url ;;
   esac
+
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) path=$dir/$path ;;
+  esac
+  common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  common=$(resolved_existing_dir "$common") || return 1
+  GIT_REPOSITORY_TARGET=$common
+  GIT_REPOSITORY_IDENTITY=local:$common
 }
 
 remote_advertised_default_branch() {
@@ -482,21 +471,24 @@ sync_upstream_into_fork() {  # <repo-dir> <config-dir>
   esac
   origin_push_url=$origin_push_urls
 
-  if ! upstream_target=$(git_repository_target "$dir" "$upstream_url") ||
-    ! upstream_identity=$(git_repository_identity "$dir" "$upstream_target"); then
+  if ! resolve_git_repository "$dir" "$upstream_url"; then
     upstream_sync_refuse "cannot determine repository identity for upstream remote '$remote'"
     return 0
   fi
-  if ! origin_target=$(git_repository_target "$dir" "$origin_url") ||
-    ! origin_identity=$(git_repository_identity "$dir" "$origin_target"); then
+  upstream_target=$GIT_REPOSITORY_TARGET
+  upstream_identity=$GIT_REPOSITORY_IDENTITY
+  if ! resolve_git_repository "$dir" "$origin_url"; then
     upstream_sync_refuse "cannot determine repository identity for origin"
     return 0
   fi
-  if ! origin_push_target=$(git_repository_target "$dir" "$origin_push_url") ||
-    ! origin_push_identity=$(git_repository_identity "$dir" "$origin_push_target"); then
+  origin_target=$GIT_REPOSITORY_TARGET
+  origin_identity=$GIT_REPOSITORY_IDENTITY
+  if ! resolve_git_repository "$dir" "$origin_push_url"; then
     upstream_sync_refuse "cannot determine repository identity for origin push destination"
     return 0
   fi
+  origin_push_target=$GIT_REPOSITORY_TARGET
+  origin_push_identity=$GIT_REPOSITORY_IDENTITY
   if [ "$origin_push_identity" != "$origin_identity" ]; then
     upstream_sync_refuse "origin push destination is not its fetch repository"
     return 0
