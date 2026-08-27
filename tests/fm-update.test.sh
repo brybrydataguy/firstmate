@@ -794,6 +794,18 @@ test_fork_upstream_default_branch_mismatch_refused() {
   assert_contains "$out" "upstream-sync: refused: 'upstream' default branch trunk does not match origin default branch main" \
     "an uncached mismatched upstream default branch is refused"
   [ "$(published_head "$w/fork.git")" = "$fork_before" ] || fail "the fork moved on an uncached topology mismatch"
+
+  w=$(new_fork_world f8-linked-worktree)
+  git -C "$w/upstream-seed" worktree add -q -b trunk "$w/upstream-linked" HEAD
+  git -C "$w/main" remote set-url upstream "$w/upstream-linked"
+  bump_upstream "$w" one
+  fork_before=$(published_head "$w/fork.git")
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-sync: refused: 'upstream' default branch trunk does not match origin default branch main" \
+    "a linked-worktree endpoint keeps its own advertised default branch"
+  [ "$(published_head "$w/fork.git")" = "$fork_before" ] || fail "the fork moved after substituting a linked worktree's common directory"
   pass "F8 a mismatched upstream default branch is refused"
 }
 

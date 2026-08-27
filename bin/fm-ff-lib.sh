@@ -329,7 +329,7 @@ git_network_url_identity() {
 GIT_REPOSITORY_TARGET=""
 GIT_REPOSITORY_IDENTITY=""
 resolve_git_repository() {
-  local dir=$1 url=$2 rest path prefix common identity
+  local dir=$1 url=$2 rest path prefix target common identity
   GIT_REPOSITORY_TARGET=""
   GIT_REPOSITORY_IDENTITY=""
   case "$url" in -*) return 1 ;; esac
@@ -369,9 +369,10 @@ resolve_git_repository() {
     /*) ;;
     *) path=$dir/$path ;;
   esac
-  common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  target=$(resolved_existing_dir "$path") || return 1
+  common=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   common=$(resolved_existing_dir "$common") || return 1
-  GIT_REPOSITORY_TARGET=$common
+  GIT_REPOSITORY_TARGET=$target
   GIT_REPOSITORY_IDENTITY=local:$common
 }
 
