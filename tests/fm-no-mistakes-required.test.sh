@@ -23,9 +23,41 @@ fetch_shared_verifier() {
 }
 
 run_verifier() {
-  local body=$1 head=$2
-  PR_BODY="$body" PR_HEAD_SHA="$head" PR_AUTHOR=regression PR_NUMBER=3006 \
+  local body=$1 head=$2 author=${3:-regression} exempt_authors=${4:-}
+  PR_BODY="$body" PR_HEAD_SHA="$head" PR_AUTHOR="$author" PR_NUMBER=3006 \
+    NM_EXEMPT_AUTHORS="$exempt_authors" \
     python3 "$VERIFY" 2>&1
+}
+
+run_legacy_event_verifier() {
+  local author=$1 exempt_authors=$2 event_file
+  event_file="$TMP_ROOT/event-$author.json"
+  printf '%s\n' \
+    "{\"pull_request\":{\"body\":\"$SIGNATURE\",\"head\":{\"sha\":\"$NEW_SHA\",\"ref\":\"feature\"},\"user\":{\"login\":\"$author\"},\"number\":3006}}" \
+    > "$event_file"
+  PR_BODY='' PR_HEAD_SHA='' PR_HEAD_REF='' PR_AUTHOR='' PR_NUMBER='' \
+    NM_EXEMPT_AUTHORS="$exempt_authors" GITHUB_EVENT_PATH="$event_file" \
+    python3 "$VERIFY" 2>&1
+}
+
+test_configured_fork_owner_is_exempt() {
+  local output rc
+  rc=0
+  output=$(run_legacy_event_verifier captain captain) || rc=$?
+  expect_code 0 "$rc" "shared action rejected the configured fork owner"
+  assert_contains "$output" "author captain is a configured exempt author" \
+    "shared action did not report the fork-owner exemption"
+  pass "shared action exempts a configured fork owner during a tool-floor transition"
+}
+
+test_legacy_non_owner_stays_strict() {
+  local output rc
+  rc=0
+  output=$(run_legacy_event_verifier contributor captain) || rc=$?
+  [ "$rc" -ne 0 ] || fail "shared action exempted a non-owner contributor"
+  assert_contains "$output" "missing structured pipeline step attestation" \
+    "non-owner failure did not preserve the structured-attestation requirement"
+  pass "shared action still requires a structured attestation from non-owners"
 }
 
 test_matching_head_and_completed_steps_pass() {
@@ -67,6 +99,8 @@ test_missing_head_fails() {
 }
 
 fetch_shared_verifier
+test_configured_fork_owner_is_exempt
+test_legacy_non_owner_stays_strict
 test_matching_head_and_completed_steps_pass
 test_mismatched_head_fails_with_both_shas
 test_missing_head_fails

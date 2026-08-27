@@ -13,6 +13,7 @@ A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and 
 The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
 It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
+The owner of a non-authoritative fork is also exempt from the PR-body check because that owner controls the fork's landing repository and may need to import a newer upstream gate before upgrading the local pipeline; the exemption never applies on `kunchenguid/firstmate` or to another contributor's PR.
 
 ## Workflow
 

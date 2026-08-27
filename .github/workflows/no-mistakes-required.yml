@@ -28,3 +28,8 @@ jobs:
     steps:
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          # A fork owner controls that fork's landing repository and may need to
+          # import a newer upstream gate before upgrading the local pipeline.
+          # Keep authoritative upstream and every non-owner contributor strict.
+          exempt-authors: ${{ github.repository != 'kunchenguid/firstmate' && github.repository_owner || '' }}
