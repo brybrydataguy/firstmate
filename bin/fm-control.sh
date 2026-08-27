@@ -859,7 +859,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line relaunch_worktree_identity= relaunch_scope_token=
+  local exit_result state note_line relaunch_worktree_identity='' relaunch_scope_token=''
   local -a spawn_args
 
   require_state_verified_backend relaunch

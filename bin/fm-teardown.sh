@@ -2377,7 +2377,7 @@ descendant_task_index() {  # <state> <task-id>
 descendant_task_worktree_identity_record() {  # <state> <task-id> <identity>
   local state=$1 task_id=$2 identity=$3 index
   index=$(descendant_task_index "$state" "$task_id") || return 1
-  DESCENDANT_TASK_WORKTREE_IDENTITIES[$index]=$identity
+  DESCENDANT_TASK_WORKTREE_IDENTITIES[index]=$identity
 }
 
 descendant_task_worktree_identity_require() {  # <state> <task-id>
@@ -2625,6 +2625,18 @@ teardown_quiesce_endpoint() {  # <backend> <target> <tab-id> <label> <home> <tas
   done
 }
 
+scan_child_task_worktree_processes_strict() {  # <task-id> <label> <worktree> <task-tmp>
+  local ID=$1
+  shift
+  task_worktree_process_scan_strict "$@"
+}
+
+reap_child_task_worktree_processes_strict() {  # <task-id> <backend> <target> <label> <worktree> <task-tmp>
+  local ID=$1 BACKEND=$2 T=$3
+  shift 3
+  reap_task_worktree_processes_strict "$@"
+}
+
 quiesce_firstmate_home_scoped_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_kind child_home child_harness child_family
   local child_backend child_target child_wt child_task_tmp child_identity child_scope_token
@@ -2649,10 +2661,8 @@ quiesce_firstmate_home_scoped_children() {  # <home>
       fm_task_process_scope_require_pid_namespace \
         "$sub_state" "$child_id" "$child_scope_token" "agy worktree teardown" || return 1
       child_task_tmp=$(meta_value "$child_meta" tasktmp)
-      (
-        ID=$child_id
-        task_worktree_process_scan_strict "child worktree" "$child_wt" "$child_task_tmp"
-      ) || return 1
+      scan_child_task_worktree_processes_strict \
+        "$child_id" "child worktree" "$child_wt" "$child_task_tmp" || return 1
       child_identity=$(fm_control_harness_worktree_identity agy "$child_wt") || return 1
       descendant_task_worktree_identity_record "$sub_state" "$child_id" "$child_identity" || return 1
       fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "agy child" || return 1
@@ -2665,12 +2675,9 @@ quiesce_firstmate_home_scoped_children() {  # <home>
         "$child_backend" "$child_target" "$(meta_value "$child_meta" zellij_tab_id)" \
         "fm-$child_id" "$home" "$child_id" || return 1
       fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
-      (
-        ID=$child_id
-        BACKEND=$child_backend
-        T=$child_target
-        reap_task_worktree_processes_strict "child worktree" "$child_wt" "$child_task_tmp"
-      ) || return 1
+      reap_child_task_worktree_processes_strict \
+        "$child_id" "$child_backend" "$child_target" \
+        "child worktree" "$child_wt" "$child_task_tmp" || return 1
       fm_control_harness_worktree_identity_verify agy "$child_wt" "$child_identity" || return 1
     elif [ "$child_kind" != secondmate ] && [ -n "$child_scope_token" ]; then
       fm_task_process_scope_quiesce "$sub_state" "$child_id" "$child_scope_token" "worker child" || return 1

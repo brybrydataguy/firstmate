@@ -1305,7 +1305,7 @@ test_target_presence_requires_complete_inventory() {
   dir="$TMP_ROOT/presence-missing"; mkdir -p "$dir/responses"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
-    FM_ZELLIJ_SESSION_LIST= \
+    FM_ZELLIJ_SESSION_LIST='' \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_target_presence_state firstmate:7 fm-task' "$ROOT" )
   [ "$out" = missing ] || fail "zellij presence should confirm a missing session, got '$out'"
 

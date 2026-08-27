@@ -10,6 +10,11 @@
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
 #
+# It also owns the one upstream-into-fork reconciliation that runs BEFORE the
+# origin fast-forward when a home follows a personal fork; see the
+# "upstream -> fork reconciliation" section below. Only /updatefirstmate calls
+# it, so no startup or spawn sync path ever pushes anything.
+#
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
 # never touches the network. A standalone clone moves through that path only when
@@ -194,6 +199,18 @@ validate_secondmate_home() {
 # each distinct git-common-dir at most once. Used ONLY by the origin base mode;
 # the local-HEAD sync never fetches.
 FETCHED=""
+FETCH_ORIGIN_URL=""
+FETCH_ORIGIN_BRANCH=""
+fetch_origin_now() {
+  local dir=$1
+  if [ -n "$FETCH_ORIGIN_URL" ] && [ -n "$FETCH_ORIGIN_BRANCH" ]; then
+    git -C "$dir" fetch --no-tags --quiet "$FETCH_ORIGIN_URL" \
+      "refs/heads/$FETCH_ORIGIN_BRANCH:refs/remotes/origin/$FETCH_ORIGIN_BRANCH" 2>/dev/null
+  else
+    git -C "$dir" fetch origin --prune --quiet 2>/dev/null
+  fi
+}
+
 fetch_once() {
   local dir=$1 common
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
@@ -202,11 +219,378 @@ fetch_once() {
       *" $common "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
+  if fetch_origin_now "$dir"; then
     [ -n "$common" ] && FETCHED="$FETCHED $common"
     return 0
   fi
   return 1
+}
+
+# --- upstream -> fork reconciliation ---------------------------------------
+# A home may follow a personal FORK as `origin` (the reviewable landing lane for
+# its own custom commits) while an authoritative UPSTREAM repository stays the
+# source of shared firstmate changes. In that topology the home cannot simply
+# fast-forward to upstream: its custom commits live on the fork, and only the
+# fork's merged head is what the home should run. So `/updatefirstmate` first
+# lands upstream's default branch on the fork by a fast-forward push, and only
+# then runs the ordinary origin fast-forward of the home itself.
+#
+# Everything here is fast-forward or nothing. There is no force, no lease, no
+# refspec `+`, no merge, no rebase, and no rewrite: the push carries the exact
+# upstream commit to `refs/heads/<default>` on `origin` and lets the receiving
+# repository refuse it when it would not be a fast-forward. Real divergence -
+# both sides carrying commits the other lacks - is a human merge decision made
+# in the fork's own review lane, so it is refused and reported, never guessed
+# at. Ambiguous topology (an unconfigured or self-referential upstream remote, a
+# non-remote value, a mismatched upstream default branch, a missing branch on
+# either side) is refused for the same reason.
+#
+# A refusal is a reported skip, exactly like every other skip in this library:
+# the home's own guarded fast-forward still runs afterwards and can still
+# advance the home to the fork's own head, because that advance is independently
+# ff-only and never reconciles the fork.
+
+# The configured upstream remote NAME for this home, or non-zero when the
+# fork topology is not configured. Reads the first non-empty, non-comment line
+# of <config-dir>/upstream-remote; an absent, empty, or comment-only file means
+# the classic single-remote update, so nothing is ever pushed by default.
+fm_upstream_remote_name() {  # <config-dir>
+  local file=$1/upstream-remote line trimmed
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -n "$trimmed" ] || continue
+    case "$trimmed" in '#'*) continue ;; esac
+    printf '%s\n' "$trimmed"
+    return 0
+  done < "$file"
+  return 1
+}
+
+git_network_repository_identity() {
+  local host=$1 port=$2 path=$3
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  while [ "${path#/}" != "$path" ]; do path=${path#/}; done
+  while [ "${path%/}" != "$path" ]; do path=${path%/}; done
+  case "$path" in *.git) path=${path%.git} ;; esac
+  [ -n "$host" ] && [ -n "$path" ] || return 1
+  case "$path" in *\?*|*\#*) return 1 ;; esac
+  if [ -n "$port" ]; then
+    printf 'network:%s:%s/%s\n' "$host" "$port" "$path"
+  else
+    printf 'network:%s/%s\n' "$host" "$path"
+  fi
+}
+
+git_network_url_identity() {
+  local url=$1 rest scheme authority hostport host port path
+  case "$url" in
+    *://*)
+      scheme=${url%%://*}
+      case "$scheme" in http|https|ssh|git) ;; *) return 1 ;; esac
+      rest=${url#*://}
+      authority=${rest%%/*}
+      [ "$authority" != "$rest" ] || return 1
+      path=${rest#*/}
+      hostport=${authority##*@}
+      port=""
+      case "$hostport" in
+        \[*\]:*)
+          host=${hostport%%]*}
+          host=${host#\[}
+          port=${hostport#*]:}
+          ;;
+        \[*\])
+          host=${hostport#\[}
+          host=${host%\]}
+          ;;
+        *:*)
+          host=${hostport%%:*}
+          port=${hostport#*:}
+          case "$port" in *:*) return 1 ;; esac
+          ;;
+        *) host=$hostport ;;
+      esac
+      case "$scheme:$port" in
+        http:80|https:443|ssh:22|git:9418) port="" ;;
+      esac
+      git_network_repository_identity "$host" "$port" "$path"
+      ;;
+    *:*)
+      hostport=${url%%:*}
+      path=${url#*:}
+      host=${hostport##*@}
+      git_network_repository_identity "$host" "" "$path"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+GIT_REPOSITORY_TARGET=""
+GIT_REPOSITORY_IDENTITY=""
+resolve_git_repository() {
+  local dir=$1 url=$2 rest path prefix target common identity
+  GIT_REPOSITORY_TARGET=""
+  GIT_REPOSITORY_IDENTITY=""
+  case "$url" in -*) return 1 ;; esac
+  case "$url" in
+    file://*)
+      rest=${url#file://}
+      case "$rest" in
+        /*) path=$rest ;;
+        localhost/*) path=/${rest#localhost/} ;;
+        *) return 1 ;;
+      esac
+      case "$path" in *%*|*\?*|*\#*) return 1 ;; esac
+      ;;
+    *://*)
+      identity=$(git_network_url_identity "$url") || return 1
+      GIT_REPOSITORY_TARGET=$url
+      GIT_REPOSITORY_IDENTITY=$identity
+      return 0
+      ;;
+    *:*)
+      prefix=${url%%:*}
+      case "$prefix" in
+        */*) path=$url ;;
+        *)
+          identity=$(git_network_url_identity "$url") || return 1
+          GIT_REPOSITORY_TARGET=$url
+          GIT_REPOSITORY_IDENTITY=$identity
+          return 0
+          ;;
+      esac
+      ;;
+    *) path=$url ;;
+  esac
+
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) path=$dir/$path ;;
+  esac
+  target=$(resolved_existing_dir "$path") || return 1
+  common=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  common=$(resolved_existing_dir "$common") || return 1
+  GIT_REPOSITORY_TARGET=$target
+  GIT_REPOSITORY_IDENTITY=local:$common
+}
+
+remote_advertised_default_branch() {
+  local dir=$1 target=$2 out branch
+  out=$(git -C "$dir" ls-remote --symref -- "$target" HEAD 2>/dev/null) || return 1
+  branch=$(printf '%s\n' "$out" |
+    sed -n 's/^ref: refs\/heads\/\([^[:space:]]*\)[[:space:]]\{1,\}HEAD$/\1/p')
+  [ -n "$branch" ] || return 1
+  case "$branch" in *$'\n'*) return 1 ;; esac
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$branch"
+}
+
+upstream_sync_refuse() {
+  echo "upstream-sync: refused: $1"
+}
+
+# Land the configured upstream's default branch on this home's fork by a
+# fast-forward push. The one printed line IS the contract, in the same
+# "<label>: <outcome>" shape every other target here uses:
+#   upstream-sync: not configured
+#   upstream-sync: already current
+#   upstream-sync: fork ahead of <remote>/<branch> by <n> commit(s)
+#   upstream-sync: synced origin/<branch> <before>..<after> from <remote>/<branch>
+#   upstream-sync: refused: <reason>
+# Always returns 0: like every other target here, an unsafe or ambiguous state
+# is a reported skip rather than a failed run.
+sync_upstream_into_fork() {  # <repo-dir> <config-dir>
+  local dir=$1 config_dir=$2
+  local remote default origin_default upstream_default remote_head
+  local upstream_urls origin_urls origin_push_urls upstream_url origin_url origin_push_url
+  local upstream_target origin_target origin_push_target
+  local upstream_identity origin_identity origin_push_identity
+  local upstream_rev origin_rev refreshed_rev before after ahead out
+
+  FETCH_ORIGIN_URL=""
+  FETCH_ORIGIN_BRANCH=""
+
+  if ! remote=$(fm_upstream_remote_name "$config_dir"); then
+    echo "upstream-sync: not configured"
+    return 0
+  fi
+
+  # The value names one configured git remote. A URL, a path, or several tokens
+  # is ambiguous topology: refuse rather than guess which repository to push to.
+  case "$remote" in
+    *[[:space:]]*)
+      upstream_sync_refuse "upstream value '$remote' must be a single git remote name"
+      return 0
+      ;;
+    -*|*/*|*:*)
+      upstream_sync_refuse "upstream value '$remote' must name a configured git remote, not a URL or path"
+      return 0
+      ;;
+  esac
+
+  if [ ! -d "$dir" ] || ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    upstream_sync_refuse "firstmate repo is not a git repo"
+    return 0
+  fi
+  if [ "$remote" = origin ]; then
+    upstream_sync_refuse "upstream remote '$remote' is the fork remote origin"
+    return 0
+  fi
+  if ! upstream_urls=$(git -C "$dir" remote get-url --all "$remote" 2>/dev/null); then
+    upstream_sync_refuse "upstream remote '$remote' is not configured"
+    return 0
+  fi
+  case "$upstream_urls" in
+    *$'\n'*)
+      upstream_sync_refuse "upstream remote '$remote' has multiple fetch URLs"
+      return 0
+      ;;
+  esac
+  upstream_url=$upstream_urls
+  if ! origin_urls=$(git -C "$dir" remote get-url --all origin 2>/dev/null); then
+    upstream_sync_refuse "no origin remote to land '$remote' on"
+    return 0
+  fi
+  case "$origin_urls" in
+    *$'\n'*)
+      upstream_sync_refuse "origin has multiple fetch URLs"
+      return 0
+      ;;
+  esac
+  origin_url=$origin_urls
+  if ! origin_push_urls=$(git -C "$dir" remote get-url --push --all origin 2>/dev/null); then
+    upstream_sync_refuse "cannot determine origin push destination"
+    return 0
+  fi
+  case "$origin_push_urls" in
+    *$'\n'*)
+      upstream_sync_refuse "origin has multiple push destinations"
+      return 0
+      ;;
+  esac
+  origin_push_url=$origin_push_urls
+
+  if ! resolve_git_repository "$dir" "$upstream_url"; then
+    upstream_sync_refuse "cannot determine repository identity for upstream remote '$remote'"
+    return 0
+  fi
+  upstream_target=$GIT_REPOSITORY_TARGET
+  upstream_identity=$GIT_REPOSITORY_IDENTITY
+  if ! resolve_git_repository "$dir" "$origin_url"; then
+    upstream_sync_refuse "cannot determine repository identity for origin"
+    return 0
+  fi
+  origin_target=$GIT_REPOSITORY_TARGET
+  origin_identity=$GIT_REPOSITORY_IDENTITY
+  if ! resolve_git_repository "$dir" "$origin_push_url"; then
+    upstream_sync_refuse "cannot determine repository identity for origin push destination"
+    return 0
+  fi
+  origin_push_target=$GIT_REPOSITORY_TARGET
+  origin_push_identity=$GIT_REPOSITORY_IDENTITY
+  if [ "$origin_push_identity" != "$origin_identity" ]; then
+    upstream_sync_refuse "origin push destination is not its fetch repository"
+    return 0
+  fi
+  if [ "$upstream_identity" = "$origin_identity" ]; then
+    upstream_sync_refuse "upstream remote '$remote' and origin are the same repository"
+    return 0
+  fi
+  upstream_url=$upstream_target
+  origin_url=$origin_target
+  origin_push_url=$origin_push_target
+
+  default=$(default_branch "$dir") || {
+    upstream_sync_refuse "cannot determine the default branch"
+    return 0
+  }
+
+  if ! origin_default=$(remote_advertised_default_branch "$dir" "$origin_url"); then
+    upstream_sync_refuse "cannot determine origin advertised default branch"
+    return 0
+  fi
+  remote_head=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$remote_head" ] && [ "${remote_head#origin/}" != "$origin_default" ]; then
+    upstream_sync_refuse "cached origin default branch ${remote_head#origin/} does not match advertised default branch $origin_default"
+    return 0
+  fi
+  if [ "$default" != "$origin_default" ]; then
+    upstream_sync_refuse "origin default branch $origin_default does not match local default branch $default"
+    return 0
+  fi
+  FETCH_ORIGIN_URL=$origin_url
+  FETCH_ORIGIN_BRANCH=$default
+  FETCHED=""
+  if ! upstream_default=$(remote_advertised_default_branch "$dir" "$upstream_url"); then
+    upstream_sync_refuse "cannot determine '$remote' advertised default branch"
+    return 0
+  fi
+  remote_head=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
+  if [ -n "$remote_head" ] && [ "${remote_head#"$remote"/}" != "$upstream_default" ]; then
+    upstream_sync_refuse "cached '$remote' default branch ${remote_head#"$remote"/} does not match advertised default branch $upstream_default"
+    return 0
+  fi
+  if [ "$upstream_default" != "$origin_default" ]; then
+    upstream_sync_refuse "'$remote' default branch $upstream_default does not match origin default branch $origin_default"
+    return 0
+  fi
+
+  if ! fetch_once "$dir"; then
+    upstream_sync_refuse "fetch from origin failed"
+    return 0
+  fi
+  if ! git -C "$dir" fetch --no-tags --quiet "$upstream_url" \
+    "refs/heads/$default:refs/remotes/$remote/$default" 2>/dev/null; then
+    upstream_sync_refuse "fetch from '$remote' failed"
+    return 0
+  fi
+
+  if ! upstream_rev=$(git -C "$dir" rev-parse --verify --quiet "refs/remotes/$remote/$default^{commit}"); then
+    upstream_sync_refuse "'$remote' has no $default branch"
+    return 0
+  fi
+  if ! origin_rev=$(git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/$default^{commit}"); then
+    upstream_sync_refuse "origin has no $default branch"
+    return 0
+  fi
+
+  if [ "$upstream_rev" = "$origin_rev" ]; then
+    echo "upstream-sync: already current"
+    return 0
+  fi
+  # The fork already contains upstream plus its own merged custom commits.
+  # There is nothing to push, and the home still advances to that custom head.
+  if git -C "$dir" merge-base --is-ancestor "$upstream_rev" "$origin_rev" 2>/dev/null; then
+    ahead=$(git -C "$dir" rev-list --count "$upstream_rev..$origin_rev" 2>/dev/null || true)
+    echo "upstream-sync: fork ahead of $remote/$default by ${ahead:-?} commit(s)"
+    return 0
+  fi
+  # Both sides hold commits the other lacks. Reconciling that needs a merge in
+  # the fork's review lane; a fast-forward push cannot express it and a forced
+  # one would replace the fork's history, so refuse and report.
+  if ! git -C "$dir" merge-base --is-ancestor "$origin_rev" "$upstream_rev" 2>/dev/null; then
+    upstream_sync_refuse "origin/$default and $remote/$default have diverged; land $remote/$default in the fork with a merge"
+    return 0
+  fi
+
+  before=$(git -C "$dir" rev-parse --short "$origin_rev")
+  after=$(git -C "$dir" rev-parse --short "$upstream_rev")
+  # No force, no lease, no leading '+': the receiving repository is what refuses
+  # a non-fast-forward, so a topology that changed under us cannot be overwritten.
+  if ! out=$(git -C "$dir" push -- "$origin_push_url" "$upstream_rev:refs/heads/$default" 2>&1); then
+    upstream_sync_refuse "fast-forward push of $remote/$default onto origin/$default failed: $(first_line "$out")"
+    return 0
+  fi
+  # Refresh origin/<default> so the home's own fast-forward sees the landed commit.
+  if ! fetch_origin_now "$dir" ||
+    ! refreshed_rev=$(git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/$default^{commit}") ||
+    [ "$refreshed_rev" != "$upstream_rev" ]; then
+    FETCHED=""
+  fi
+  echo "upstream-sync: synced origin/$default $before..$after from $remote/$default"
+  return 0
 }
 
 # Which watched instruction paths changed between HEAD and BASE (comma list).

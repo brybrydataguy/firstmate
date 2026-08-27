@@ -7,6 +7,13 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CHECK="$ROOT/bin/fm-subagent-pretool-check.sh"
+
+# Drop the guard's escape hatch from the AMBIENT environment for the whole file.
+# A firstmate crewmate session exports FM_ALLOW_SUBAGENT=1, and inheriting it
+# turns every deny case here into an allow - the suite would then report a
+# broken guard instead of being able to detect one. The escape-hatch cases below
+# still set it deliberately, per invocation, which is what they are testing.
+unset FM_ALLOW_SUBAGENT
 TMP_ROOT=$(fm_test_tmproot fm-subagent-pretool-tests)
 PRIMARY="$TMP_ROOT/primary"
 STATE="$PRIMARY/state"

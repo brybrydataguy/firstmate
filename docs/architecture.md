@@ -355,6 +355,7 @@ For a remote route, the configured code root updates from its own origin on that
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+The optional fork-aware reconciliation remains in the shared helper, while [configuration.md](configuration.md#self-update-remotes-configupstream-remote) authoritatively defines its operator topology, invocation boundary, and refusals.
 
 ## Restart-proof
 

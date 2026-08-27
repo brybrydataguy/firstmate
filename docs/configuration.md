@@ -46,6 +46,44 @@ Homes on any other primary harness never load this feature and are entirely unaf
 A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and Pi never separately prints or renders the merge note itself.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
 
+## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
+
+Supervision is an easier job than the captain's own conversation, so the branch can run on a cheaper model than main.
+It is also an easier job than the captain's own conversation needs reasoning for, so the branch can run at a shallower effort than main as well.
+The Pi `/supervision-model` command settles both in one flow: it opens a selector over the models that Pi reports with configured credentials and that this home's stored credentials let the isolated supervision branch resolve, plus a first "Follow main" entry, and then a second picker for the branch's reasoning effort.
+In Pi's terminal TUI, the model step uses Pi's bounded scrolling list with its input and fuzzy filtering primitives, the same list primitive Pi's `/model` picker scrolls: typing filters the entries, "Follow main" stays the first entry whenever it still matches, and a long catalog scrolls inside the dialog instead of running off the terminal.
+The non-TUI RPC, JSON, and print modes have no custom-component surface and keep Pi's generic selector without search, where terminal overflow does not apply.
+The effort list is a handful of levels and stays on Pi's plain selector dialog.
+Both picks change the supervision branch alone and never the captain's own conversation model or effort.
+It persists the model pick in gitignored `config/supervision-branch-model` and the effort pick in gitignored `config/supervision-branch-effort`, both under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+Firstmate keeps no model catalog of its own; the list is the intersection of what Pi reports when the picker opens and what a fresh isolated branch runtime can run.
+A provider that exists only because an extension registered it inside the captain's session is not offered, while stored OAuth and API-key credentials retain their native credential type because Firstmate never copies, converts, installs, or overwrites credentials for the branch runtime.
+The file holds one `<provider>/<model-id>` line followed by one newline, split at the first `/` so a provider-qualified model id such as `openrouter/anthropic/claude-sonnet-4-5` survives intact.
+An absent, unreadable, or unparseable file means no pin, and the branch then follows main's own current model, applied explicitly and live whenever main changes models mid-session.
+A valid pin wins over main and remains unaffected by main's model changes.
+Picking "Follow main" removes the file, and the command writes a pin at mode `0600` and replaces it atomically so a failed write leaves the current choice unchanged rather than claiming persistence.
+The file's current state decides the branch model on every branch build - the first wake of a cold start and the reopen after `/new`, `/resume`, `/fork`, or reload - and it overrides Pi's restore of whatever model a reopened branch session recorded, so the choice survives all of them.
+That override is what keeps "Follow main" honest: a branch conversation that ran under an earlier pin still records that model, so clearing the file explicitly applies main's model rather than letting the reopened session restore the old one.
+Only when main's own model is unknown, or this home's stored credentials cannot run it in the isolated branch runtime, does an unpinned build fall back to passing no override at all, which is the behavior from before this file existed; the wake is never lost over model choice, and the command says plainly when main's model could not be applied instead of reporting a change that did not take effect.
+A pin naming a model Pi cannot hand back, because the model is unknown or has no configured credentials, is never silently downgraded onto main's model: the branch refuses to build and the wake falls back to the captain-facing main path naming the unusable pin, exactly as any other unreachable branch does.
+Picking also releases the live branch so the next wake reopens the same persistent branch conversation under the new model without waiting for a session replacement.
+
+The effort file holds one Pi thinking level followed by one newline, and the two pins are independent: a captain may pin a model, an effort, both, or neither.
+The effort step runs after the model step because the effective branch model decides which levels exist: its menu is Pi's own supported-level list, so a model that maps no extended levels simply does not offer them and a non-reasoning model offers only `off`.
+The picker keeps no effort catalog of its own; when main's model cannot be resolved, it first resolves the model recorded by the persistent branch conversation and uses Pi's supported levels for that effective model.
+If neither model can be resolved, the picker invents no levels and the command says that the branch's effective effort cannot be determined.
+An absent, unreadable, or unrecognized file means no effort pin, and the branch then follows main's own current effort, applied explicitly and live whenever main changes effort mid-session.
+A valid pin wins over main and remains unaffected by main's effort changes.
+Picking "Follow main" removes the file, and the command writes an effort pin at mode `0600` and replaces it atomically, exactly as it writes a model pin.
+The effort file's current state decides the branch effort on every branch build, on the same create-and-reopen contract as the model pin and for the same reason: a reopened branch conversation records the effort it last ran under, so only an explicit override keeps "Follow main" honest.
+Only when main's own effort cannot be read either does an unpinned build fall back to passing no effort override at all, which is the behavior from before this file existed.
+Pi owns the clamp, so a pinned level the branch's model cannot run becomes that model's nearest supported level rather than a refusal; the branch is never refused over effort, the captain's raw pick is kept so it applies again on a model that supports it, and the command reports the level the branch will really run at rather than the raw pin.
+An effort token Pi would not recognize at all is treated as no pin rather than passed to that clamp, which would otherwise collapse a typo into the model's lowest level.
+
+Cancelling the model picker cancels the whole command and changes neither choice.
+Cancelling only the effort picker keeps the standing effort choice and still applies the model pick made in the same run, and the command's one closing message reports both choices as they will actually take effect.
+Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Pi Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -214,6 +252,42 @@ This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
 A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
 
+## Self-update remotes (config/upstream-remote)
+
+By default a home pulls firstmate's shared changes straight from `origin`, and `/updatefirstmate` only ever fast-forwards it.
+A home that keeps its own custom firstmate changes needs somewhere to review and land them, so it can follow a personal **fork** as `origin` while the authoritative repository stays a second remote.
+The local, gitignored `config/upstream-remote` file turns that topology on by naming the authoritative remote, for example:
+
+```sh
+git remote set-url origin https://github.com/<you>/firstmate      # the fork: your landing lane
+git remote add upstream https://github.com/kunchenguid/firstmate  # the authoritative source
+printf 'upstream\n' > config/upstream-remote
+```
+
+Only the first non-empty, non-comment line is read, and it must be a single configured git remote **name**, never a URL or path.
+An absent, empty, or comment-only file keeps the classic single-remote update exactly as before, so the fork lane ships inert and nothing is ever pushed until you configure it.
+
+With it configured, `/updatefirstmate` first lands the upstream's default branch on your fork by a fast-forward push, then runs the ordinary fast-forward of this home to the fork's own head - so the home ends up on the fork's merged custom work, not on upstream directly.
+Only `/updatefirstmate` performs this reconciliation; startup and spawn convergence use the same fast-forward helper but never invoke this push path.
+The reconciliation is one plain Git push with no GitHub API call, no force, no lease, no leading `+` refspec, no merge, no rebase, and no rewrite, so the receiving repository enforces the fast-forward.
+The run reports exactly one `upstream-sync:` outcome for the reconciliation.
+`not configured`, `already current`, `fork ahead ...`, and `synced ...` are healthy outcomes that need no intervention.
+`refused: <reason>` needs operator attention, but leaves both published branches exactly where they were and never authorizes a force, rebase, history rewrite, or hand-push around the refusal.
+
+The reconciliation refuses rather than guesses whenever:
+
+- The fork and the upstream have each landed commits the other lacks.
+  Reconciling that is a merge decision, made by opening a pull request in the fork that merges the upstream branch; a fast-forward push cannot express it.
+- The configured value does not name an existing remote, names `origin` itself, is a URL or path, or carries more than one token.
+- Either remote has multiple fetch URLs, `origin` has multiple push destinations, its push destination is not the same repository as its fetch URL, either repository identity cannot be resolved unambiguously, or the upstream remote resolves to the same repository as `origin`.
+- The local default branch, either remote's advertised default branch, or an existing cached remote default branch disagree, or either remote lacks the agreed branch.
+
+A refusal is reported and does not stop this home from advancing: its own update stays independently fast-forward-only, so it can still move to the fork's head while the reconciliation waits for you.
+Dirty or unlanded local work still stops that advance, with the work left untouched, exactly as it does without a fork.
+Local secondmate homes need no setting of their own because they follow whatever commit lands in the primary home's fork, so this file is not inherited.
+A remote secondmate host's shared code root is a separate self-update site and reads its own `config/upstream-remote`; configure the file there too when that host should follow a fork.
+[`bin/fm-ff-lib.sh`](../bin/fm-ff-lib.sh) owns the reconciliation mechanics, and the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md) owns what firstmate does with the result.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.
@@ -325,7 +399,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, compatible gh-axi, chrome-devtools-axi, compatible lavish-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
+The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer, compatible gh-axi, chrome-devtools-axi, compatible lavish-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
@@ -560,6 +634,14 @@ A durable handled acknowledgement stops future source re-announcement, while a r
 Discovery is never a timer.
 Each registered source has its own child process blocking on that source, and the watcher's per-cycle `reconcile` republishes every captured result with no durable handled acknowledgement yet - regardless of any earlier publication - restarts a source whose owner is gone, and stops this home's runner when reconciliation runs after its registration disappeared unexpectedly.
 In supported steady state, a home with no registered source runs nothing, generates no state, and keeps its ordinary cadence.
+
+Whether a captured result is a routine no-op is adapter knowledge too, and the runner names no adapter-specific condition for it either.
+Before publishing, the runner calls `bin/fm-procevent-<adapter>.sh silent <result-file>` and treats exit 0 as the only silence verdict: the result is recorded as durably handled and never announced, so it neither wakes a handler now nor returns on a later reconcile.
+A missing command, an error, any other exit, or a silence the runner cannot durably record all publish the `check` wake exactly as before, so an adapter with no notion of a no-op needs no change and an unknown or degraded result always reaches its handler.
+Silence is independent of the keyed-answer feed below, which still runs once per capture for every adapter: suppressing an announcement never suppresses the captain's own answer.
+For Lavish that verdict covers exactly one shape - a session the adapter classifies `ended` that carries no queued content block at all, which is a review surface closed with nothing said.
+Any recognized top-level `prompts` or `feedback` block counts as content regardless of its declared count, and a malformed header makes the result indeterminate rather than empty.
+A `Send & End` close carrying the captain's answer arrives as `status: feedback` with `session_ended`, so it classifies `feedback` and is announced unchanged, as is any `ended` result that still carries content, and every `waiting`, `missing`, `unknown`, or unreadable result.
 
 Whether a captured result ends its source is adapter knowledge, never the runner's.
 After capture - and after initial `check` publication for the default ordering - the runner calls `bin/fm-procevent-<adapter>.sh terminal <result-file>` and retires the registration on exit 0 alone, dropping only the exact registration generation captured by its claim and releasing that claim only after removal succeeds under one source boundary; a missing command, an error, or any other exit keeps the source armed, so an adapter with no notion of ending needs no change.

@@ -158,7 +158,7 @@ fm_task_process_scope_record_value() {
 
 fm_task_process_scope_record_read() {
   local state=$1 id=$2 expected_token=$3 path record line key value
-  local version= status= token= containment= leader_pid= leader_identity=
+  local version='' status='' token='' containment='' leader_pid='' leader_identity=''
   local anchor_pid anchor_identity agent_pid agent_identity endpoint_pid endpoint_identity
   local pgid identity_value legacy=0
   path=$(fm_task_process_scope_path "$state" "$id") || return 1
@@ -305,6 +305,7 @@ EOF
     return 1
   fi
   FM_TASK_PROCESS_SCOPE_STATUS=active
+  # shellcheck disable=SC2034 # Public record-reader output retained for callers.
   FM_TASK_PROCESS_SCOPE_VERSION=$version
   FM_TASK_PROCESS_SCOPE_TOKEN=$token
   FM_TASK_PROCESS_SCOPE_CONTAINMENT=$containment
@@ -316,7 +317,9 @@ EOF
   FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY=$agent_identity
   FM_TASK_PROCESS_SCOPE_ENDPOINT_PID=$endpoint_pid
   FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY=$endpoint_identity
+  # shellcheck disable=SC2034 # Backward-compatible alias for the anchor PID.
   FM_TASK_PROCESS_SCOPE_LEADER_PID=$anchor_pid
+  # shellcheck disable=SC2034 # Backward-compatible alias for the anchor identity.
   FM_TASK_PROCESS_SCOPE_LEADER_IDENTITY=$anchor_identity
   FM_TASK_PROCESS_SCOPE_PGID=$pgid
 }
@@ -325,7 +328,8 @@ fm_task_process_scope_snapshot() {
   local token=$1 pgid=$2 use_group=$3 excluded_pid=${4:-$$} exclude_descendants=${5:-0}
   local output line pid current_ppid current_pgid current_stat rest identity pids="" failed=0
   local scanner_pid=${BASHPID:-$$} excluded_pids excluded_trees changed
-  output=$(LC_ALL=C ps eww -axo pid=,ppid=,pgid=,stat=,command= 2>/dev/null) || return 1
+  output=$(LC_ALL=C ps axeww \
+    -o pid= -o ppid= -o pgid= -o stat= -o command= 2>/dev/null) || return 1
   excluded_pids=" $scanner_pid "
   excluded_trees=" $scanner_pid "
   case "$excluded_pid" in
