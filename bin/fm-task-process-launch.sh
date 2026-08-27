@@ -11,6 +11,7 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-task-process-lib.sh
 . "$SCRIPT_DIR/fm-task-process-lib.sh"
 
 scope_agent() {

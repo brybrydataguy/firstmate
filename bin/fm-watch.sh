@@ -839,8 +839,19 @@ fm_check_output_cleanup() {
   FM_CHECK_OUTPUT=
 }
 
+fm_active_check_group_live() {  # <process-group-id>
+  local output
+  output=$(LC_ALL=C ps ax -o pgid= -o stat= 2>/dev/null) || return 2
+  awk -v wanted="$1" '
+    $1 == wanted && $2 !~ /Z/ { live=1 }
+    END { exit live ? 0 : 1 }
+  ' <<EOF
+$output
+EOF
+}
+
 fm_active_check_stop() {
-  local pid=${FM_ACTIVE_CHECK_PID:-} pgid=${FM_ACTIVE_CHECK_PGID:-} i
+  local pid=${FM_ACTIVE_CHECK_PID:-} pgid=${FM_ACTIVE_CHECK_PGID:-} i group_state
   [ -n "$pid" ] || [ -n "$pgid" ] || return 0
   [ -z "$pgid" ] || kill -TERM -- "-$pgid" 2>/dev/null || true
   [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
@@ -853,12 +864,25 @@ fm_active_check_stop() {
   [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null || true
   [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
   i=0
-  while [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null && [ "$i" -lt 100 ]; do
+  while [ -n "$pgid" ] && [ "$i" -lt 100 ]; do
+    fm_active_check_group_live "$pgid"
+    group_state=$?
+    case "$group_state" in
+      0) ;;
+      1) break ;;
+      *) return 1 ;;
+    esac
     sleep 0.01
     i=$((i + 1))
   done
-  if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
-    return 1
+  if [ -n "$pgid" ]; then
+    fm_active_check_group_live "$pgid"
+    group_state=$?
+    case "$group_state" in
+      0) return 1 ;;
+      1) ;;
+      *) return 1 ;;
+    esac
   fi
   FM_ACTIVE_CHECK_PID=
   FM_ACTIVE_CHECK_PGID=

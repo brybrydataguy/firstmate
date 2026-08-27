@@ -95,6 +95,10 @@ case "${1:-}" in
               FM_FAKE_LAUNCH_COMMAND=$arg FM_FAKE_LAUNCH_CWD=$FM_FAKE_PANE_PATH \
                 python3 -c 'import os; os.setpgrp(); os.chdir(os.environ["FM_FAKE_LAUNCH_CWD"]); os.execvp("bash", ["bash", "-c", os.environ["FM_FAKE_LAUNCH_COMMAND"]])' \
                 </dev/null >/dev/null 2>&1 &
+              for _ in $(seq 1 250); do
+                grep -q '^status=active$' "$FM_STATE_OVERRIDE"/*.process-scope 2>/dev/null && break
+                sleep 0.02
+              done
               ;;
           esac
         fi

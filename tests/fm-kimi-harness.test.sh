@@ -75,7 +75,7 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       case "$literal" in
-        *' --auto')
+        *'fm-task-process-launch.sh'*|*' --auto')
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
@@ -164,6 +164,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
@@ -174,6 +175,21 @@ run_spawn() {
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
+}
+
+captured_worker_launch() {
+  python3 - "$1" <<'PY'
+import os
+import shlex
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    launch = stream.read().rstrip("\n")
+args = shlex.split(launch)
+if len(args) == 6 and os.path.basename(args[0]) == "fm-task-process-launch.sh":
+    launch = args[4]
+print(launch)
+PY
 }
 
 read_spawn_record() {
@@ -197,8 +213,8 @@ test_kimi_launch_then_send_is_verified() {
   expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
-  launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  launch=$(captured_worker_launch "$CASE_DIR/launch.log")
+  [ "$launch" = "env -u ANTIGRAVITY_LS_VERSION -u ANTIGRAVITY_SOURCE_METADATA env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
@@ -454,8 +470,8 @@ test_kimi_falls_back_to_expanded_home_binary() {
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
-  launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
+  launch=$(captured_worker_launch "$CASE_DIR/launch.log")
+  [ "$launch" = "env -u ANTIGRAVITY_LS_VERSION -u ANTIGRAVITY_SOURCE_METADATA env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
