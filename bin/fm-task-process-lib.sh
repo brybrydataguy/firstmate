@@ -396,7 +396,14 @@ fm_task_process_scope_record_read() {
   endpoint_identity=
   pgid=
   while IFS= read -r line; do
-    case "$line" in *=*) ;; *) continue ;; esac
+    [ -n "$line" ] || continue
+    case "$line" in
+      *=*) ;;
+      *)
+        echo "error: task $id has a malformed process-scope record at $path" >&2
+        return 1
+        ;;
+    esac
     key=${line%%=*}
     value=${line#*=}
     case "$key" in
@@ -409,7 +416,10 @@ fm_task_process_scope_record_read() {
         esac
         owned_keys="$owned_keys $key"
         ;;
-      *) continue ;;
+      *)
+        echo "error: task $id has a malformed process-scope record at $path" >&2
+        return 1
+        ;;
     esac
     case "$key" in
       version) version=$value ;;

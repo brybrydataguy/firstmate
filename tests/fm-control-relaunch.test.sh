@@ -1976,6 +1976,48 @@ test_contradictory_process_scope_records_refuse_without_mutation() {
     "empty active-field refusal should name the malformed record"
   [ "$(cat "$dir/home/state/rl75.process-scope")" = "$before" ] \
     || fail "empty active-field refusal mutated the process-scope record"
+
+  dir=$(new_case unknown-generation-key rl76)
+  add_ship_task "$dir" rl76 claude
+  prepare_dead_relaunch "$dir" rl76
+  start_scope_sleeper
+  pid=$SCOPE_SLEEPER_PID
+  token=test-rl76
+  identity=$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))
+  {
+    printf 'version=1\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=process-group\n'
+    printf 'leader_pid=%s\n' "$pid"
+    printf 'leader_identity=%s\n' "$identity"
+    printf 'pgid=%s\n' "$pid"
+    printf ' boot_generation=boot-now\n'
+  } > "$dir/home/state/rl76.process-scope"
+  before=$(cat "$dir/home/state/rl76.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl76 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "unknown process-scope keys must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "unknown-key refusal should name the malformed record"
+  [ "$(cat "$dir/home/state/rl76.process-scope")" = "$before" ] \
+    || fail "unknown-key refusal mutated the process-scope record"
+  assert_scope_sleeper_alive
+
+  dir=$(new_case malformed-record-line rl77)
+  add_ship_task "$dir" rl77 claude
+  prepare_dead_relaunch "$dir" rl77
+  printf 'not-a-process-scope-field\n' >> "$dir/home/state/rl77.process-scope"
+  before=$(cat "$dir/home/state/rl77.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl77 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "malformed nonempty process-scope lines must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "malformed-line refusal should name the malformed record"
+  [ "$(cat "$dir/home/state/rl77.process-scope")" = "$before" ] \
+    || fail "malformed-line refusal mutated the process-scope record"
   pass "fm-spawn --relaunch: contradictory process-scope schemas refuse without mutation"
 }
 
