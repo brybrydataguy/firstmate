@@ -8,6 +8,9 @@
 # The launcher publishes `active` before allowing the agent child to exec, stays
 # alive as the immutable ownership anchor, and publishes `empty` only after the
 # agent and every remaining scoped descendant have exited.
+# When the host exposes a portable boot generation, the active record stores it
+# so later quiesce can prove a prior-boot scope without signaling; the record
+# contract is owned by `fm-task-process-lib.sh`.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,6 +86,12 @@ fm_task_process_enclosure_validate "$enclosure" || {
   exit 1
 }
 export FM_TASK_PROCESS_SCOPE_TOKEN=$token
+boot_generation=
+if boot_generation=$(fm_task_process_current_boot_generation); then
+  :
+else
+  boot_generation=
+fi
 anchor_identity=$(fm_task_process_identity "$pid") || exit 1
 "$BASH" "$SCRIPT_DIR/fm-task-process-launch.sh" --scope-agent \
   "$record" "$token" "$containment" "$launch" "$enclosure" <&0 &
@@ -120,6 +129,7 @@ trap scope_launch_cleanup EXIT
   printf 'endpoint_pid=%s\n' "$endpoint_pid"
   printf 'endpoint_identity=%s\n' "$endpoint_identity"
   printf 'pgid=%s\n' "$pgid"
+  [ -z "$boot_generation" ] || printf 'boot_generation=%s\n' "$boot_generation"
 } > "$tmp"
 chmod 0600 "$tmp"
 mv -f -- "$tmp" "$record"

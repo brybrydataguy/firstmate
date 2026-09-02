@@ -128,7 +128,8 @@ Text for a worker to read and commands that drive a worker's process are separat
 
 Every verified ship and scout worker launches through `bin/fm-task-process-launch.sh`, which publishes a generation-bound `state/<id>.process-scope` and remains as its ownership anchor until the agent and every scoped descendant have exited.
 Control-plane exit and relaunch plus teardown use that record to reap detached task processes before a replacement starts or a worktree is removed, and refuse rather than signal when the token, process identities, or group ownership cannot be proved.
-[`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns the record, identity, containment, and quiescence contract; [`configuration.md`](configuration.md#harness-support) owns agy's additional PID-namespace limit.
+The shared process-scope owner also performs reboot-safe retirement without signaling before those same paths apply their ordinary guards.
+[`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns the record, identity, containment, and quiescence contract; [`configuration.md`](configuration.md#harness-support) owns which records support reboot recovery and agy's additional PID-namespace limit.
 
 ## Busy state is semantic, per adapter
 

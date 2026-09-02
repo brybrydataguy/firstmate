@@ -120,7 +120,9 @@
 #     bin/fm-task-process-lib.sh. Teardown validates and quiesces that scope
 #     before inspecting or removing its worktree, so detached work remains
 #     attributable through its recorded group after changing cwd or clearing
-#     the task token, and through the token after leaving that group. An agy
+#     the task token, and through the token after leaving that group. A scope
+#     proved to predate the current host boot is retired without signaling,
+#     then ordinary landed-work and endpoint guards still apply. An agy
 #     worktree transition additionally requires PID-namespace containment,
 #     retains the worktree's filesystem identity across process and endpoint
 #     quiescence, and refuses unless endpoint absence is confirmed. Legacy

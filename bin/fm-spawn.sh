@@ -31,7 +31,9 @@
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   the new incarnation. A recorded process scope proved to predate the current
+#   host boot is retired without signaling by bin/fm-task-process-lib.sh, then
+#   these same endpoint, worktree, and agent-state guards still apply.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --raw-harness <identity> declares the adapter identity of a raw launch

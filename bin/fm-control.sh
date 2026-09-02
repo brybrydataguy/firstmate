@@ -32,7 +32,9 @@
 #              the backend's recovery-grade classifier reports the agent gone,
 #              and a durable worker process scope is empty when one is recorded.
 #              Already-stopped with no live scoped processes is success
-#              (idempotent).
+#              (idempotent). A scope proved to predate the current host boot is
+#              retired to empty without signaling by bin/fm-task-process-lib.sh
+#              before this postcondition is judged.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
