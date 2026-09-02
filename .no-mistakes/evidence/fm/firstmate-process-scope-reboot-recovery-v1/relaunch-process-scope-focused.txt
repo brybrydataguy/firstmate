@@ -1,0 +1,16 @@
+ok - fm-control relaunch: a proved prior-boot scope retires without signaling a reused pid
+ok - fm-spawn --relaunch: a proved prior-boot scope retires without signaling a reused pid
+ok - fm-spawn --relaunch: current-boot identity mismatch still refuses without mutation
+ok - fm-spawn --relaunch: generation-less lstart scopes remain untouched
+ok - fm-spawn --relaunch: portable boot-generation mismatch retires without signaling
+ok - fm-spawn --relaunch: matching boot generation still refuses
+ok - fm-spawn --relaunch: missing boot generation still refuses
+ok - fm-spawn --relaunch: unreadable boot generation still refuses
+ok - fm-spawn --relaunch: an already-empty process scope remains idempotent
+ok - fm-spawn --relaunch: agent-presence still blocks independently of prior-boot recovery
+ok - fm-spawn --relaunch: endpoint cwd still blocks independently of prior-boot recovery
+ok - fm-spawn --relaunch: a symlinked process-scope record still refuses without mutation
+ok - fm-spawn --relaunch: a token-mismatched process-scope record still refuses without mutation
+ok - fm-spawn --relaunch: binary records and generation evidence refuse without mutation
+ok - fm-spawn --relaunch: contradictory process-scope schemas refuse without mutation
+ok - process-scope launch retains token ownership across escaped descendants

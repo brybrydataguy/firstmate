@@ -1,0 +1,21 @@
+=== Proven prior-boot fm-spawn --relaunch ===
+$ fm-spawn.sh ev1 --relaunch --harness claude
+warning: /var/folders/13/t392f7894bjb4vdz0l4s8ydm0000gn/T/fm-control-relaunch.5jNMPV/evidence-relaunch-10191/home/data/ev1/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned ev1 harness=claude kind=ship mode=no-mistakes yolo=off window=fmses:fm-ev1 worktree=/var/folders/13/t392f7894bjb4vdz0l4s8ydm0000gn/T/fm-control-relaunch.5jNMPV/evidence-relaunch-10191/wt
+exit=0
+reused_process=alive (not signaled)
+$ cat state/ev1.process-scope
+version=2
+status=empty
+token=test-ev1
+containment=process-group
+endpoint_pid=3
+endpoint_identity=lstart=Wed_Sep_2_10:58:39_2026
+
+=== Generation-less legacy record refusal ===
+$ fm-spawn.sh ev2 --relaunch --harness claude
+warning: /var/folders/13/t392f7894bjb4vdz0l4s8ydm0000gn/T/fm-control-relaunch.5jNMPV/evidence-legacy-23661/home/data/ev2/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+error: task ev2 process-scope anchor is gone or changed; refusing to signal an unowned process group
+exit=1
+record=byte-identical
+reused_process=alive (not signaled)

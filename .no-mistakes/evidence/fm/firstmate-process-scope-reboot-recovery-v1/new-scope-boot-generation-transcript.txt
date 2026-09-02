@@ -1,0 +1,24 @@
+$ FM_TASK_PROCESS_BOOT_GENERATION=boot-demo fm-task-process-launch.sh <record> demo-token - "sleep 30" -
+
+$ cat <record>  # while the harmless worker is running
+version=2
+status=active
+token=demo-token
+containment=process-group
+anchor_pid=70902
+anchor_identity=lstart=Wed_Sep_2_10:58:20_2026
+agent_pid=70932
+agent_identity=lstart=Wed_Sep_2_10:58:20_2026
+endpoint_pid=70900
+endpoint_identity=lstart=Wed_Sep_2_10:58:20_2026
+pgid=70902
+boot_generation=boot-demo
+
+$ kill -TERM <recorded-agent-pid>; wait <launcher>; cat <record>
+launcher_exit=143
+version=2
+status=empty
+token=demo-token
+containment=process-group
+endpoint_pid=70900
+endpoint_identity=lstart=Wed_Sep_2_10:58:20_2026

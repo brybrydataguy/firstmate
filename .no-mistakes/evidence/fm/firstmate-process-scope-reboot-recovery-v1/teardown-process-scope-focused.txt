@@ -1,0 +1,2 @@
+ok - teardown: a proved prior-boot scope lets merged-task cleanup proceed without signaling
+ok - teardown: prior-boot recovery still applies ordinary unlanded-work guards
