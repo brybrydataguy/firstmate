@@ -232,6 +232,69 @@ write_meta() {
     "mode=$mode"
 }
 
+SCOPE_BOOT_TIME=1700000000
+SCOPE_SLEEPER_PID=
+
+unset_boot_overlays() {
+  unset FM_TASK_PROCESS_BOOT_GENERATION FM_TASK_PROCESS_BOOT_GENERATION_FILE
+  unset FM_TASK_PROCESS_BOOT_TIME FM_TASK_PROCESS_BOOT_TIME_FILE
+}
+
+scope_lstart_at() {
+  local epoch=$1 out
+  if out=$(LC_ALL=C date -j -r "$epoch" +"%a_%b_%d_%T_%Y" 2>/dev/null); then
+    printf 'lstart=%s\n' "$out"
+    return 0
+  fi
+  out=$(LC_ALL=C date -d "@$epoch" +"%a_%b_%d_%T_%Y") || return 1
+  printf 'lstart=%s\n' "$out"
+}
+
+start_scope_sleeper() {
+  python3 - <<'PY' &
+import os
+os.setpgrp()
+os.execv("/bin/sleep", ["sleep", "300"])
+PY
+  SCOPE_SLEEPER_PID=$!
+  local attempts=0 pgid=
+  while [ "$attempts" -lt 50 ]; do
+    pgid=$(ps -o pgid= -p "$SCOPE_SLEEPER_PID" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$SCOPE_SLEEPER_PID" ] && break
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "$pgid" = "$SCOPE_SLEEPER_PID" ] \
+    || fail "scope sleeper did not enter its own process group"
+}
+
+stop_scope_sleeper() {
+  [ -n "${SCOPE_SLEEPER_PID:-}" ] || return 0
+  kill -KILL "$SCOPE_SLEEPER_PID" 2>/dev/null || true
+  wait "$SCOPE_SLEEPER_PID" 2>/dev/null || true
+  SCOPE_SLEEPER_PID=
+}
+
+write_prior_boot_scope() {
+  local case_dir=$1 identity=$2 boot_gen=${3-boot-prior}
+  local pid=$SCOPE_SLEEPER_PID token=test-task-x1
+  printf 'process_scope_token=%s\n' "$token" >> "$case_dir/state/task-x1.meta"
+  {
+    printf 'version=2\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=process-group\n'
+    printf 'anchor_pid=%s\n' "$pid"
+    printf 'anchor_identity=%s\n' "$identity"
+    printf 'agent_pid=%s\n' "$pid"
+    printf 'agent_identity=%s\n' "$identity"
+    printf 'endpoint_pid=3\n'
+    printf 'endpoint_identity=%s\n' "$identity"
+    printf 'pgid=%s\n' "$pid"
+    [ -z "$boot_gen" ] || printf 'boot_generation=%s\n' "$boot_gen"
+  } > "$case_dir/state/task-x1.process-scope"
+}
+
 # Commit something on the worktree's task branch. Args: case_dir [message]
 wt_commit() {
   local case_dir=$1 msg=${2:-wt work}
@@ -2979,6 +3042,72 @@ EOF
   pass "an erroring lsof scan refuses teardown and preserves the task"
 }
 
+test_pre_reboot_merged_task_cleanup_proceeds() {
+  local case_dir rc identity wt_head
+  case_dir=$(make_case reboot-merged)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  start_scope_sleeper
+  identity=$(fm_task_process_identity "$SCOPE_SLEEPER_PID") \
+    || fail "could not read the reused process identity"
+  write_prior_boot_scope "$case_dir" "$identity" boot-prior
+  export FM_TASK_PROCESS_BOOT_GENERATION=boot-now
+  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset_boot_overlays
+
+  if [ "$rc" -ne 0 ]; then
+    stop_scope_sleeper
+  fi
+  expect_code 0 "$rc" "prior-boot merged cleanup should proceed through ordinary landed-work guards"$'\n'"$(cat "$case_dir/stderr")"
+  kill -0 "$SCOPE_SLEEPER_PID" 2>/dev/null \
+    || fail "merged-task cleanup signaled the reused process"
+  stop_scope_sleeper
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "prior-boot merged cleanup did not complete ordinary teardown"
+  pass "teardown: a proved prior-boot scope lets merged-task cleanup proceed without signaling"
+}
+
+test_pre_reboot_unlanded_work_still_refuses() {
+  local case_dir rc identity
+  case_dir=$(make_case reboot-unlanded)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  start_scope_sleeper
+  identity=$(fm_task_process_identity "$SCOPE_SLEEPER_PID") \
+    || fail "could not read the reused process identity"
+  write_prior_boot_scope "$case_dir" "$identity" boot-prior
+  export FM_TASK_PROCESS_BOOT_GENERATION=boot-now
+  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset_boot_overlays
+
+  expect_code 1 "$rc" "prior-boot recovery must not discard unlanded work"
+  grep -q REFUSED "$case_dir/stderr" || fail "unlanded prior-boot teardown printed no REFUSED line"
+  kill -0 "$SCOPE_SLEEPER_PID" 2>/dev/null \
+    || fail "unlanded teardown signaled the reused process"
+  stop_scope_sleeper
+  grep -qx 'status=empty' "$case_dir/state/task-x1.process-scope" \
+    || fail "unlanded prior-boot teardown did not retire the proved scope before the landed-work guard"
+  grep -qx 'token=test-task-x1' "$case_dir/state/task-x1.process-scope" \
+    || fail "unlanded prior-boot teardown lost the process-scope token"
+  assert_present "$case_dir/wt" \
+    "unlanded prior-boot teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unlanded prior-boot teardown removed task metadata"
+  pass "teardown: prior-boot recovery still applies ordinary unlanded-work guards"
+}
+
 test_reused_pid_identity_is_not_force_killed() {
   local case_dir rc pid
   case_dir=$(make_case reused-pid-identity)
@@ -3312,6 +3441,8 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
+test_pre_reboot_merged_task_cleanup_proceeds
+test_pre_reboot_unlanded_work_still_refuses
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass

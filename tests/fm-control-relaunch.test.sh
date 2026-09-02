@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. After a host reboot, a proved prior-boot process scope is retired
+#      without signaling, then ordinary relaunch guards still apply.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -38,9 +40,13 @@ TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 TASK_TMPS=()
+SCOPE_SLEEPERS=()
 
 relaunch_cleanup() {
-  local d
+  local d pid
+  for pid in "${SCOPE_SLEEPERS[@]:-}"; do
+    kill -KILL "$pid" 2>/dev/null || true
+  done
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -274,6 +280,86 @@ done
 exec "$FM_REAL_RM" "$@"
 SH
   chmod +x "$1/fakebin/rm"
+}
+
+SCOPE_BOOT_TIME=1700000000
+
+unset_boot_overlays() {
+  unset FM_TASK_PROCESS_BOOT_GENERATION FM_TASK_PROCESS_BOOT_GENERATION_FILE
+  unset FM_TASK_PROCESS_BOOT_TIME FM_TASK_PROCESS_BOOT_TIME_FILE
+}
+
+set_boot_overlays() {
+  export FM_TASK_PROCESS_BOOT_GENERATION=${1:-boot-now}
+  export FM_TASK_PROCESS_BOOT_TIME=${2:-$SCOPE_BOOT_TIME}
+}
+
+scope_lstart_at() {
+  local epoch=$1 out
+  if out=$(LC_ALL=C date -j -r "$epoch" +"%a_%b_%d_%T_%Y" 2>/dev/null); then
+    printf 'lstart=%s\n' "$out"
+    return 0
+  fi
+  out=$(LC_ALL=C date -d "@$epoch" +"%a_%b_%d_%T_%Y") || return 1
+  printf 'lstart=%s\n' "$out"
+}
+
+start_scope_sleeper() {
+  python3 - <<'PY' &
+import os
+os.setpgrp()
+os.execv("/bin/sleep", ["sleep", "300"])
+PY
+  SCOPE_SLEEPER_PID=$!
+  SCOPE_SLEEPERS+=("$SCOPE_SLEEPER_PID")
+  local attempts=0 pgid=
+  while [ "$attempts" -lt 50 ]; do
+    pgid=$(ps -o pgid= -p "$SCOPE_SLEEPER_PID" 2>/dev/null | tr -d '[:space:]')
+    [ "$pgid" = "$SCOPE_SLEEPER_PID" ] && break
+    /bin/sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ "$pgid" = "$SCOPE_SLEEPER_PID" ] \
+    || fail "scope sleeper did not enter its own process group"
+}
+
+assert_scope_sleeper_alive() {
+  kill -0 "$SCOPE_SLEEPER_PID" 2>/dev/null \
+    || fail "reused process $SCOPE_SLEEPER_PID was signaled"
+}
+
+write_active_reused_scope() {
+  local dir=$1 id=$2 identity=$3 boot_gen=${4-}
+  local pid=$SCOPE_SLEEPER_PID token=test-$id
+  {
+    printf 'version=2\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=process-group\n'
+    printf 'anchor_pid=%s\n' "$pid"
+    printf 'anchor_identity=%s\n' "$identity"
+    printf 'agent_pid=%s\n' "$pid"
+    printf 'agent_identity=%s\n' "$identity"
+    printf 'endpoint_pid=3\n'
+    printf 'endpoint_identity=%s\n' "$identity"
+    printf 'pgid=%s\n' "$pid"
+    [ -z "$boot_gen" ] || printf 'boot_generation=%s\n' "$boot_gen"
+  } > "$dir/home/state/$id.process-scope"
+}
+
+prepare_dead_relaunch() {
+  local dir=$1 id=$2
+  printf 'zsh' > "$dir/fake/command"
+  printf 'claude' > "$dir/fake/becomes"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd"
+}
+
+assert_scope_empty() {
+  local path=$1 id=$2
+  grep -qx 'status=empty' "$path" || fail "process scope was not retired to empty"
+  grep -qx "token=test-$id" "$path" || fail "empty process scope lost its token"
+  grep -qx 'endpoint_pid=3' "$path" || fail "empty process scope lost its endpoint binding"
+  grep -q '^anchor_pid=' "$path" && fail "empty process scope retained an active anchor"
 }
 
 # --- 1. same-harness relaunch -----------------------------------------------
@@ -1462,6 +1548,391 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+# --- 7. prior-boot process-scope recovery -----------------------------------
+
+test_pre_reboot_relaunch_does_not_signal_a_reused_pid() {
+  local dir out rc identity
+  dir=$(new_case reboot-relaunch rl50)
+  add_ship_task "$dir" rl50 claude
+  prepare_dead_relaunch "$dir" rl50
+  start_scope_sleeper
+  identity=$(fm_task_process_identity "$SCOPE_SLEEPER_PID") \
+    || fail "could not read the reused process identity"
+  write_active_reused_scope "$dir" rl50 "$identity" boot-prior
+  set_boot_overlays boot-now
+  out=$(run_control "$dir" rl50 relaunch --note "resume after reboot"); rc=$?
+  unset_boot_overlays
+  expect_code 0 "$rc" "a proved prior-boot scope should let relaunch proceed"$'\n'"$out"
+  assert_contains "$out" "relaunched rl50" "prior-boot relaunch should replace the agent"
+  assert_scope_sleeper_alive
+  assert_scope_empty "$dir/home/state/rl50.process-scope" rl50
+  pass "fm-control relaunch: a proved prior-boot scope retires without signaling a reused pid"
+}
+
+test_pre_reboot_spawn_relaunch_does_not_signal_a_reused_pid() {
+  local dir out rc identity
+  dir=$(new_case reboot-spawn rl51)
+  add_ship_task "$dir" rl51 claude
+  prepare_dead_relaunch "$dir" rl51
+  start_scope_sleeper
+  identity=$(fm_task_process_identity "$SCOPE_SLEEPER_PID") \
+    || fail "could not read the reused process identity"
+  write_active_reused_scope "$dir" rl51 "$identity" boot-prior
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl51 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 0 "$rc" "spawn --relaunch should retire a proved prior-boot scope"$'\n'"$out"
+  assert_scope_sleeper_alive
+  assert_scope_empty "$dir/home/state/rl51.process-scope" rl51
+  pass "fm-spawn --relaunch: a proved prior-boot scope retires without signaling a reused pid"
+}
+
+test_current_boot_identity_mismatch_still_refuses() {
+  local dir out rc before
+  dir=$(new_case current-boot-mismatch rl52)
+  add_ship_task "$dir" rl52 claude
+  prepare_dead_relaunch "$dir" rl52
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl52 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-now
+  before=$(cat "$dir/home/state/rl52.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl52 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "current-boot identity mismatch must still refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "current-boot mismatch should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl52.process-scope")" = "$before" ] \
+    || fail "current-boot mismatch mutated the process-scope record"
+  pass "fm-spawn --relaunch: current-boot identity mismatch still refuses without mutation"
+}
+
+test_legacy_darwin_pre_boot_lstart_relaunches() {
+  local dir out rc
+  dir=$(new_case legacy-pre-boot rl53)
+  add_ship_task "$dir" rl53 claude
+  prepare_dead_relaunch "$dir" rl53
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl53 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))"
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl53 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 0 "$rc" "legacy Darwin lstart before boot should recover"$'\n'"$out"
+  assert_scope_sleeper_alive
+  assert_scope_empty "$dir/home/state/rl53.process-scope" rl53
+  pass "fm-spawn --relaunch: legacy Darwin lstart before boot retires without signaling"
+}
+
+test_legacy_equal_lstart_refuses() {
+  local dir out rc before
+  dir=$(new_case legacy-equal rl54)
+  add_ship_task "$dir" rl54 claude
+  prepare_dead_relaunch "$dir" rl54
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl54 "$(scope_lstart_at "$SCOPE_BOOT_TIME")"
+  before=$(cat "$dir/home/state/rl54.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl54 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "lstart equal to boot time must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "equal lstart should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl54.process-scope")" = "$before" ] \
+    || fail "equal lstart mutated the process-scope record"
+  pass "fm-spawn --relaunch: lstart equal to boot time still refuses"
+}
+
+test_legacy_after_lstart_refuses() {
+  local dir out rc before
+  dir=$(new_case legacy-after rl55)
+  add_ship_task "$dir" rl55 claude
+  prepare_dead_relaunch "$dir" rl55
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl55 "$(scope_lstart_at $((SCOPE_BOOT_TIME + 60)))"
+  before=$(cat "$dir/home/state/rl55.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl55 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "lstart after boot time must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "later lstart should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl55.process-scope")" = "$before" ] \
+    || fail "later lstart mutated the process-scope record"
+  pass "fm-spawn --relaunch: lstart after boot time still refuses"
+}
+
+test_legacy_unparseable_lstart_refuses() {
+  local dir out rc before
+  dir=$(new_case legacy-unparseable rl56)
+  add_ship_task "$dir" rl56 claude
+  prepare_dead_relaunch "$dir" rl56
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl56 "lstart=not-a-timestamp"
+  before=$(cat "$dir/home/state/rl56.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl56 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "unparseable lstart must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "unparseable lstart should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl56.process-scope")" = "$before" ] \
+    || fail "unparseable lstart mutated the process-scope record"
+  pass "fm-spawn --relaunch: unparseable lstart still refuses"
+}
+
+test_portable_boot_generation_mismatch_relaunches() {
+  local dir out rc
+  dir=$(new_case portable-mismatch rl57)
+  add_ship_task "$dir" rl57 claude
+  prepare_dead_relaunch "$dir" rl57
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl57 "$(scope_lstart_at $((SCOPE_BOOT_TIME + 60)))" boot-prior
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl57 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 0 "$rc" "portable boot-generation mismatch should recover even when lstart is after boot"$'\n'"$out"
+  assert_scope_sleeper_alive
+  assert_scope_empty "$dir/home/state/rl57.process-scope" rl57
+  pass "fm-spawn --relaunch: portable boot-generation mismatch retires without signaling"
+}
+
+test_matching_boot_generation_refuses_even_with_pre_boot_lstart() {
+  local dir out rc before
+  dir=$(new_case matching-generation rl58)
+  add_ship_task "$dir" rl58 claude
+  prepare_dead_relaunch "$dir" rl58
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl58 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-now
+  before=$(cat "$dir/home/state/rl58.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl58 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "matching boot generation must refuse even if lstart predates boot"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "matching generation should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl58.process-scope")" = "$before" ] \
+    || fail "matching generation mutated the process-scope record"
+  pass "fm-spawn --relaunch: matching boot generation still refuses"
+}
+
+test_missing_boot_generation_without_legacy_refuses() {
+  local dir out rc before
+  dir=$(new_case missing-generation rl59)
+  add_ship_task "$dir" rl59 claude
+  prepare_dead_relaunch "$dir" rl59
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl59 "starttime=12345"
+  before=$(cat "$dir/home/state/rl59.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl59 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "missing boot generation without Darwin lstart must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "Linux-style starttime without a generation should keep the refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl59.process-scope")" = "$before" ] \
+    || fail "missing generation mutated the process-scope record"
+  pass "fm-spawn --relaunch: missing boot generation without legacy proof still refuses"
+}
+
+test_unreadable_boot_generation_uses_legacy_when_lstart_predates() {
+  local dir out rc
+  dir=$(new_case unreadable-legacy rl60)
+  add_ship_task "$dir" rl60 claude
+  prepare_dead_relaunch "$dir" rl60
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl60 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-prior
+  export FM_TASK_PROCESS_BOOT_GENERATION=
+  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
+  out=$(run_spawn "$dir" rl60 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 0 "$rc" "unreadable generation should still recover through legacy Darwin proof"$'\n'"$out"
+  assert_scope_sleeper_alive
+  assert_scope_empty "$dir/home/state/rl60.process-scope" rl60
+  pass "fm-spawn --relaunch: unreadable boot generation still recovers through legacy proof"
+}
+
+test_unreadable_boot_generation_without_legacy_refuses() {
+  local dir out rc before
+  dir=$(new_case unreadable-nolegacy rl61)
+  add_ship_task "$dir" rl61 claude
+  prepare_dead_relaunch "$dir" rl61
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl61 "starttime=12345" boot-prior
+  before=$(cat "$dir/home/state/rl61.process-scope")
+  export FM_TASK_PROCESS_BOOT_GENERATION=
+  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
+  out=$(run_spawn "$dir" rl61 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "unreadable generation without legacy proof must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "unreadable generation without lstart should keep the refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl61.process-scope")" = "$before" ] \
+    || fail "unreadable generation mutated the process-scope record"
+  pass "fm-spawn --relaunch: unreadable boot generation without legacy proof still refuses"
+}
+
+test_empty_scope_relaunch_is_idempotent() {
+  local dir out rc before
+  dir=$(new_case empty-idempotent rl62)
+  add_ship_task "$dir" rl62 claude
+  prepare_dead_relaunch "$dir" rl62
+  before=$(cat "$dir/home/state/rl62.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl62 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 0 "$rc" "an already-empty scope should relaunch"$'\n'"$out"
+  [ "$(cat "$dir/home/state/rl62.process-scope")" = "$before" ] \
+    || fail "empty-scope relaunch mutated the already-empty process-scope record"
+  pass "fm-spawn --relaunch: an already-empty process scope remains idempotent"
+}
+
+test_clock_ambiguous_boot_time_refuses() {
+  local dir out rc before
+  dir=$(new_case clock-ambiguous rl67)
+  add_ship_task "$dir" rl67 claude
+  prepare_dead_relaunch "$dir" rl67
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl67 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))"
+  before=$(cat "$dir/home/state/rl67.process-scope")
+  unset FM_TASK_PROCESS_BOOT_GENERATION FM_TASK_PROCESS_BOOT_GENERATION_FILE
+  export FM_TASK_PROCESS_BOOT_TIME=
+  out=$(run_spawn "$dir" rl67 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "an unreadable boot time must refuse legacy Darwin proof"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "clock-ambiguous boot time should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl67.process-scope")" = "$before" ] \
+    || fail "clock-ambiguous boot time mutated the process-scope record"
+  pass "fm-spawn --relaunch: unreadable boot time still refuses without mutation"
+}
+
+test_mixed_identity_without_generation_refuses() {
+  local dir out rc before pid token
+  dir=$(new_case mixed-identity rl68)
+  add_ship_task "$dir" rl68 claude
+  prepare_dead_relaunch "$dir" rl68
+  start_scope_sleeper
+  pid=$SCOPE_SLEEPER_PID
+  token=test-rl68
+  {
+    printf 'version=2\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=process-group\n'
+    printf 'anchor_pid=%s\n' "$pid"
+    printf 'anchor_identity=%s\n' "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))"
+    printf 'agent_pid=%s\n' "$pid"
+    printf 'agent_identity=starttime=12345\n'
+    printf 'endpoint_pid=3\n'
+    printf 'endpoint_identity=starttime=12345\n'
+    printf 'pgid=%s\n' "$pid"
+  } > "$dir/home/state/rl68.process-scope"
+  before=$(cat "$dir/home/state/rl68.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl68 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "mixed lstart/starttime identities without a generation must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "mixed identities should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl68.process-scope")" = "$before" ] \
+    || fail "mixed identities mutated the process-scope record"
+  pass "fm-spawn --relaunch: mixed identities without a generation still refuse"
+}
+
+test_pre_reboot_spawn_relaunch_still_requires_an_agent_free_endpoint() {
+  local dir out rc before
+  dir=$(new_case reboot-live rl63)
+  add_ship_task "$dir" rl63 claude
+  printf 'claude' > "$dir/fake/command"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd"
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl63 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-prior
+  before=$(cat "$dir/home/state/rl63.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl63 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a live agent must still refuse even with a proved prior-boot scope"
+  assert_contains "$out" "positively agent-free endpoint" \
+    "agent-presence should block independently of prior-boot recovery"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl63.process-scope")" = "$before" ] \
+    || fail "agent-presence refusal mutated the prior-boot process-scope record"
+  pass "fm-spawn --relaunch: agent-presence still blocks independently of prior-boot recovery"
+}
+
+test_pre_reboot_spawn_relaunch_still_requires_the_recorded_worktree() {
+  local dir out rc before
+  dir=$(new_case reboot-cwd rl64)
+  add_ship_task "$dir" rl64 claude
+  printf 'zsh' > "$dir/fake/command"
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl64 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-prior
+  before=$(cat "$dir/home/state/rl64.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl64 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a pane outside the worktree must still refuse even with a proved prior-boot scope"
+  assert_contains "$out" "not its recorded worktree" \
+    "cwd should block independently of prior-boot recovery"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl64.process-scope")" = "$before" ] \
+    || fail "cwd refusal mutated the prior-boot process-scope record"
+  pass "fm-spawn --relaunch: endpoint cwd still blocks independently of prior-boot recovery"
+}
+
+test_pre_reboot_symlinked_scope_refuses_without_mutation() {
+  local dir out rc
+  dir=$(new_case reboot-symlink rl65)
+  add_ship_task "$dir" rl65 claude
+  prepare_dead_relaunch "$dir" rl65
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl65 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-prior
+  mv "$dir/home/state/rl65.process-scope" "$dir/home/state/rl65.process-scope.real"
+  ln -s "$dir/home/state/rl65.process-scope.real" "$dir/home/state/rl65.process-scope"
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl65 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a symlinked process-scope record must refuse"
+  [ -L "$dir/home/state/rl65.process-scope" ] \
+    || fail "symlink refusal replaced the process-scope symlink"
+  grep -qx 'status=active' "$dir/home/state/rl65.process-scope.real" \
+    || fail "symlink refusal mutated the backing process-scope record"
+  assert_scope_sleeper_alive
+  pass "fm-spawn --relaunch: a symlinked process-scope record still refuses without mutation"
+}
+
+test_pre_reboot_token_mismatch_refuses_without_mutation() {
+  local dir out rc before
+  dir=$(new_case reboot-token rl66)
+  add_ship_task "$dir" rl66 claude
+  prepare_dead_relaunch "$dir" rl66
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl66 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-prior
+  sed 's/^token=test-rl66$/token=other-token/' \
+    "$dir/home/state/rl66.process-scope" > "$dir/home/state/rl66.process-scope.tmp"
+  mv "$dir/home/state/rl66.process-scope.tmp" "$dir/home/state/rl66.process-scope"
+  before=$(cat "$dir/home/state/rl66.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl66 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a token-mismatched process-scope record must refuse"
+  assert_contains "$out" "stale or malformed process-scope record" \
+    "token mismatch should keep the existing record refusal"
+  [ "$(cat "$dir/home/state/rl66.process-scope")" = "$before" ] \
+    || fail "token mismatch mutated the process-scope record"
+  assert_scope_sleeper_alive
+  pass "fm-spawn --relaunch: a token-mismatched process-scope record still refuses without mutation"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1513,3 +1984,22 @@ test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_pre_reboot_relaunch_does_not_signal_a_reused_pid
+test_pre_reboot_spawn_relaunch_does_not_signal_a_reused_pid
+test_current_boot_identity_mismatch_still_refuses
+test_legacy_darwin_pre_boot_lstart_relaunches
+test_legacy_equal_lstart_refuses
+test_legacy_after_lstart_refuses
+test_legacy_unparseable_lstart_refuses
+test_portable_boot_generation_mismatch_relaunches
+test_matching_boot_generation_refuses_even_with_pre_boot_lstart
+test_missing_boot_generation_without_legacy_refuses
+test_unreadable_boot_generation_uses_legacy_when_lstart_predates
+test_unreadable_boot_generation_without_legacy_refuses
+test_empty_scope_relaunch_is_idempotent
+test_pre_reboot_spawn_relaunch_still_requires_an_agent_free_endpoint
+test_pre_reboot_spawn_relaunch_still_requires_the_recorded_worktree
+test_pre_reboot_symlinked_scope_refuses_without_mutation
+test_pre_reboot_token_mismatch_refuses_without_mutation
+test_clock_ambiguous_boot_time_refuses
+test_mixed_identity_without_generation_refuses

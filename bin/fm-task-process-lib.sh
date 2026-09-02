@@ -3,12 +3,32 @@
 # Durable process-scope record and cleanup owner for verified ship and scout workers.
 # `state/<id>.meta` binds the record through `process_scope_token=`, and the
 # matching `state/<id>.process-scope` is a private versioned record with one of
-# two states: `active` carries containment, ownership-anchor, agent-process, and
-# process-group identities, while `empty` carries containment, the token, and an
+# two states: `active` carries containment, ownership-anchor, agent-process,
+# process-group identities, and a portable `boot_generation=` binding when the
+# host exposes one, while `empty` carries containment, the token, and an
 # optional endpoint identity retained from the active scope.
 # Writers publish each state atomically and readers reject symlinks, malformed
 # fields, stale tokens, changed process identities, and an owned group that has
 # moved, so no lifecycle operation signals processes from an unproved scope.
+# Record-read unexports the launch token after copying it, and snapshot
+# excludes the lifecycle shell, so an inherited token cannot select the
+# quiesce process for signaling.
+# Quiesce may retire an active scope to empty without signaling only when it
+# proves that scope predates the current host boot, so none of its processes
+# can still exist: a well-formed recorded `boot_generation=` that differs from
+# the current host generation, or a legacy Darwin `lstart=` identity whose
+# absolute start is strictly earlier than the current boot time. Matching,
+# missing, or unreadable boot-generation evidence keeps the current refusal
+# unless that legacy proof applies. Equal, later, or unparseable timestamps,
+# mixed or non-`lstart=` identities, current-boot identity mismatch, a missing
+# PID, an agent-free endpoint, elapsed time, branch cleanliness, and
+# process-name guesses never prove prior-boot safety and never authorize a
+# signal. Repeated quiesce on empty is idempotent. Overlay sources for tests
+# and recovery: `FM_TASK_PROCESS_BOOT_GENERATION` or
+# `FM_TASK_PROCESS_BOOT_GENERATION_FILE` replace the host generation,
+# `FM_TASK_PROCESS_BOOT_TIME` or `FM_TASK_PROCESS_BOOT_TIME_FILE` replace the
+# host boot time, and `FM_TASK_PROCESS_PROC_ROOT` remains the `/proc` identity
+# overlay; a set overlay is exclusive and does not fall through to the host.
 # `fm-task-process-launch.sh` produces the record and retains the ownership
 # anchor until the agent and every scoped descendant are gone.
 # Lifecycle callers quiesce the scope before relaunch or worktree removal;
@@ -135,6 +155,167 @@ fm_task_process_recorded_identity_valid() {
   esac
 }
 
+fm_task_process_boot_generation_valid() {
+  case "${1-}" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+fm_task_process_boot_time_valid() {
+  case "${1-}" in
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+}
+
+fm_task_process_read_single_line_file() {
+  local path=$1 value
+  [ -n "$path" ] && [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  value=$(cat "$path" 2>/dev/null) || return 1
+  value=${value%$'\n'}
+  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
+fm_task_process_current_boot_generation() {
+  local value path proc_root
+  if [ "${FM_TASK_PROCESS_BOOT_GENERATION+x}" = x ]; then
+    value=$FM_TASK_PROCESS_BOOT_GENERATION
+    fm_task_process_boot_generation_valid "$value" || return 1
+    printf '%s\n' "$value"
+    return 0
+  fi
+  if [ "${FM_TASK_PROCESS_BOOT_GENERATION_FILE+x}" = x ]; then
+    value=$(fm_task_process_read_single_line_file "$FM_TASK_PROCESS_BOOT_GENERATION_FILE") || return 1
+    fm_task_process_boot_generation_valid "$value" || return 1
+    printf '%s\n' "$value"
+    return 0
+  fi
+  proc_root=${FM_TASK_PROCESS_PROC_ROOT:-/proc}
+  path=$proc_root/sys/kernel/random/boot_id
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if value=$(fm_task_process_read_single_line_file "$path"); then
+      fm_task_process_boot_generation_valid "$value" || return 1
+      printf '%s\n' "$value"
+      return 0
+    fi
+    [ "${FM_TASK_PROCESS_PROC_ROOT+x}" = x ] && return 1
+  elif [ "${FM_TASK_PROCESS_PROC_ROOT+x}" = x ]; then
+    return 1
+  fi
+  value=$(sysctl -n kern.bootsessionuuid 2>/dev/null) || return 1
+  value=${value%$'\n'}
+  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  fm_task_process_boot_generation_valid "$value" || return 1
+  printf '%s\n' "$value"
+}
+
+fm_task_process_current_boot_time() {
+  local value path proc_root
+  if [ "${FM_TASK_PROCESS_BOOT_TIME+x}" = x ]; then
+    value=$FM_TASK_PROCESS_BOOT_TIME
+    fm_task_process_boot_time_valid "$value" || return 1
+    printf '%s\n' "$value"
+    return 0
+  fi
+  if [ "${FM_TASK_PROCESS_BOOT_TIME_FILE+x}" = x ]; then
+    value=$(fm_task_process_read_single_line_file "$FM_TASK_PROCESS_BOOT_TIME_FILE") || return 1
+    fm_task_process_boot_time_valid "$value" || return 1
+    printf '%s\n' "$value"
+    return 0
+  fi
+  proc_root=${FM_TASK_PROCESS_PROC_ROOT:-/proc}
+  path=$proc_root/stat
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    value=$(awk '$1 == "btime" && $2 ~ /^[1-9][0-9]*$/ {print $2; exit}' "$path")
+    if [ -n "$value" ]; then
+      fm_task_process_boot_time_valid "$value" || return 1
+      printf '%s\n' "$value"
+      return 0
+    fi
+    [ "${FM_TASK_PROCESS_PROC_ROOT+x}" = x ] && return 1
+  elif [ "${FM_TASK_PROCESS_PROC_ROOT+x}" = x ]; then
+    return 1
+  fi
+  value=$(sysctl -n kern.boottime 2>/dev/null) || return 1
+  value=$(printf '%s\n' "$value" | awk -F'[=,]' '/sec/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
+  fm_task_process_boot_time_valid "$value" || return 1
+  printf '%s\n' "$value"
+}
+
+fm_task_process_lstart_epoch() {
+  local identity=$1 raw weekday month day time year padded extra epoch
+  case "$identity" in
+    lstart=*) raw=${identity#lstart=} ;;
+    *) return 1 ;;
+  esac
+  raw=${raw//_/ }
+  extra=
+  IFS=' ' read -r weekday month day time year extra <<EOF
+$raw
+EOF
+  [ -z "${extra:-}" ] || return 1
+  case "$weekday" in Sun|Mon|Tue|Wed|Thu|Fri|Sat) ;; *) return 1 ;; esac
+  case "$month" in
+    Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ;;
+    *) return 1 ;;
+  esac
+  case "$day" in
+    [1-9]|0[1-9]|[12][0-9]|3[01]) ;;
+    *) return 1 ;;
+  esac
+  case "$time" in
+    [0-2][0-9]:[0-5][0-9]:[0-5][0-9]) ;;
+    *) return 1 ;;
+  esac
+  case "$year" in
+    [12][0-9][0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+  case "$day" in
+    [1-9]) padded=0$day ;;
+    *) padded=$day ;;
+  esac
+  epoch=$(LC_ALL=C date -j -f '%a %b %d %T %Y' \
+    "$weekday $month $padded $time $year" +%s 2>/dev/null) \
+    || epoch=$(LC_ALL=C date -d "$weekday $month $padded $time $year" +%s 2>/dev/null) \
+    || return 1
+  fm_task_process_boot_time_valid "$epoch" || return 1
+  printf '%s\n' "$epoch"
+}
+
+fm_task_process_legacy_prior_boot_proven() {
+  local current_boot anchor_epoch agent_epoch
+  current_boot=$(fm_task_process_current_boot_time) || return 1
+  case "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" in
+    lstart=*) ;;
+    *) return 1 ;;
+  esac
+  anchor_epoch=$(fm_task_process_lstart_epoch "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY") || return 1
+  [ "$anchor_epoch" -lt "$current_boot" ] || return 1
+  case "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY" in
+    lstart=*)
+      agent_epoch=$(fm_task_process_lstart_epoch "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY") || return 1
+      [ "$agent_epoch" -lt "$current_boot" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+fm_task_process_scope_prior_boot_proven() {
+  local recorded_generation current_generation
+  recorded_generation=${FM_TASK_PROCESS_SCOPE_BOOT_GENERATION-}
+  if [ -n "$recorded_generation" ]; then
+    fm_task_process_boot_generation_valid "$recorded_generation" || return 1
+    if current_generation=$(fm_task_process_current_boot_generation); then
+      [ "$current_generation" != "$recorded_generation" ] || return 1
+      return 0
+    fi
+  fi
+  fm_task_process_legacy_prior_boot_proven
+}
+
 fm_task_process_pgid() {
   local value
   value=$(LC_ALL=C ps -p "$1" -o pgid= 2>/dev/null) || return 1
@@ -159,6 +340,7 @@ fm_task_process_scope_record_value() {
 fm_task_process_scope_record_read() {
   local state=$1 id=$2 expected_token=$3 path record line key value
   local version='' status='' token='' containment='' leader_pid='' leader_identity=''
+  local boot_generation=''
   local anchor_pid anchor_identity agent_pid agent_identity endpoint_pid endpoint_identity
   local pgid identity_value legacy=0
   path=$(fm_task_process_scope_path "$state" "$id") || return 1
@@ -195,6 +377,7 @@ fm_task_process_scope_record_read() {
       endpoint_pid) endpoint_pid=$value ;;
       endpoint_identity) endpoint_identity=$value ;;
       pgid) pgid=$value ;;
+      boot_generation) boot_generation=$value ;;
     esac
   done <<EOF
 $record
@@ -203,6 +386,10 @@ EOF
   if [ -z "$version" ] || ! fm_task_process_scope_token_valid "$token" \
      || [ "$token" != "$expected_token" ]; then
     echo "error: task $id has a stale or malformed process-scope record at $path" >&2
+    return 1
+  fi
+  if [ -n "$boot_generation" ] && ! fm_task_process_boot_generation_valid "$boot_generation"; then
+    echo "error: task $id has a malformed process-scope record at $path" >&2
     return 1
   fi
   case "$containment" in
@@ -224,6 +411,10 @@ EOF
       FM_TASK_PROCESS_SCOPE_STATUS=empty
       FM_TASK_PROCESS_SCOPE_VERSION=$version
       FM_TASK_PROCESS_SCOPE_TOKEN=$token
+      # The launch token is an env selector for worker processes. Callers that
+      # inherit an exported token (a process-scoped crewmate running tests)
+      # must not republish the record's token onto the lifecycle process.
+      export -n FM_TASK_PROCESS_SCOPE_TOKEN 2>/dev/null || true
       FM_TASK_PROCESS_SCOPE_CONTAINMENT=$containment
       FM_TASK_PROCESS_SCOPE_PATH=$path
       FM_TASK_PROCESS_SCOPE_LEGACY=0
@@ -233,6 +424,7 @@ EOF
       FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY=
       FM_TASK_PROCESS_SCOPE_ENDPOINT_PID=$endpoint_pid
       FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY=$endpoint_identity
+      FM_TASK_PROCESS_SCOPE_BOOT_GENERATION=$boot_generation
       FM_TASK_PROCESS_SCOPE_LEADER_PID=
       FM_TASK_PROCESS_SCOPE_LEADER_IDENTITY=
       FM_TASK_PROCESS_SCOPE_PGID=
@@ -308,6 +500,7 @@ EOF
   # shellcheck disable=SC2034 # Public record-reader output retained for callers.
   FM_TASK_PROCESS_SCOPE_VERSION=$version
   FM_TASK_PROCESS_SCOPE_TOKEN=$token
+  export -n FM_TASK_PROCESS_SCOPE_TOKEN 2>/dev/null || true
   FM_TASK_PROCESS_SCOPE_CONTAINMENT=$containment
   FM_TASK_PROCESS_SCOPE_PATH=$path
   FM_TASK_PROCESS_SCOPE_LEGACY=$legacy
@@ -317,6 +510,7 @@ EOF
   FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY=$agent_identity
   FM_TASK_PROCESS_SCOPE_ENDPOINT_PID=$endpoint_pid
   FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY=$endpoint_identity
+  FM_TASK_PROCESS_SCOPE_BOOT_GENERATION=$boot_generation
   # shellcheck disable=SC2034 # Backward-compatible alias for the anchor PID.
   FM_TASK_PROCESS_SCOPE_LEADER_PID=$anchor_pid
   # shellcheck disable=SC2034 # Backward-compatible alias for the anchor identity.
@@ -330,8 +524,11 @@ fm_task_process_scope_snapshot() {
   local scanner_pid=${BASHPID:-$$} excluded_pids excluded_trees changed
   output=$(LC_ALL=C ps axeww \
     -o pid= -o ppid= -o pgid= -o stat= -o command= 2>/dev/null) || return 1
-  excluded_pids=" $scanner_pid "
-  excluded_trees=" $scanner_pid "
+  # $$ is the lifecycle shell even inside snapshot command substitution;
+  # BASHPID is the substitution itself. Exclude both so an inherited worker
+  # token cannot select the quiesce process for signaling.
+  excluded_pids=" $scanner_pid $$ "
+  excluded_trees=" $scanner_pid $$ "
   case "$excluded_pid" in
     *[!0-9]*|'') ;;
     *)
@@ -460,6 +657,15 @@ fm_task_process_scope_quiesce() {
   }
   fm_task_process_scope_record_read "$state" "$id" "$expected_token" || return 1
   [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 0
+  if fm_task_process_scope_prior_boot_proven; then
+    fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN" \
+      "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" \
+      "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY" || {
+      echo "error: could not publish the empty process scope for task $id" >&2
+      return 1
+    }
+    return 0
+  fi
   own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') || {
     echo "error: cannot inspect the lifecycle command's process group for task $id" >&2
     return 1
