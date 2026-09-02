@@ -101,8 +101,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
-- A worker process scope whose recorded processes cannot be proved still live is refused rather than signaled, except a scope whose recorded boot generation differs from the current host generation is retired to empty first so exit, relaunch, and cleanup can apply their ordinary guards; older generation-less records remain refused.
-  [`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns that contract.
+- Worker process scopes follow the ordinary identity-bound quiescence path unless trustworthy boot-generation evidence authorizes retirement without signaling; generation-less scopes cannot use reboot recovery.
+  [`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns the full contract, and [configuration](configuration.md#harness-support) owns which records support reboot recovery.
 
 ## Capability matrix
 
@@ -122,5 +122,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, prior-boot process-scope recovery and independent endpoint guards, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

@@ -2,16 +2,16 @@
 
 # Durable process-scope record and cleanup owner for verified ship and scout workers.
 # `state/<id>.meta` binds the record through `process_scope_token=`, and the
-# matching `state/<id>.process-scope` is a private versioned record with one of
-# two states: `active` carries containment, ownership-anchor, agent-process,
-# process-group identities, and a portable `boot_generation=` binding when the
-# host exposes one, while `empty` carries containment, the token, and an
-# optional endpoint identity retained from the active scope.
-# Version 1 empty records contain version, status, and token, with optional
-# containment; active records additionally require leader_pid, leader_identity,
-# and pgid. Version 2 empty records permit an optional paired endpoint identity;
-# active records instead require paired anchor and agent identities plus pgid,
-# and permit optional containment, paired endpoint identity, and boot generation.
+# matching `state/<id>.process-scope` is a private versioned record in `active`
+# or `empty` state.
+# Version 1 empty records require version, status, and token and permit optional
+# containment; active records require those same base fields plus leader_pid,
+# leader_identity, and pgid and likewise permit containment.
+# Version 2 empty records require version, status, and token and permit optional
+# containment and a paired endpoint identity. Version 2 active records require
+# version, status, token, paired anchor and agent identities, and pgid; they
+# permit optional containment, a paired endpoint identity, and a portable
+# `boot_generation=` binding when the host exposes one.
 # Writers publish each state atomically and readers reject symlinks, malformed
 # fields, duplicate owned fields, owned fields outside the exact version/state
 # schema, stale tokens, changed process identities, and an owned group that has
@@ -21,13 +21,14 @@
 # Quiesce may retire an active scope to empty without signaling only when a
 # well-formed recorded `boot_generation=` differs from the current host
 # generation, proving that none of its processes can still exist. Matching,
-# missing, or unreadable boot-generation evidence keeps the current refusal.
-# Generation-less records, including old Darwin `lstart=` records, cannot use
-# prior-boot retirement because their capture-time timezone and wall-clock
-# history cannot be proved retroactively. A missing PID, an agent-free endpoint,
-# elapsed time, branch cleanliness, and process-name guesses never prove
-# prior-boot safety and never
-# authorize a signal. Repeated quiesce on empty is idempotent. Overlay sources
+# missing, or unreadable boot-generation evidence does not authorize prior-boot
+# retirement; quiesce continues through the ordinary identity and ownership
+# checks. Generation-less records, including old Darwin `lstart=` records,
+# cannot use prior-boot retirement because their capture-time timezone and
+# wall-clock history cannot be proved retroactively. A missing PID, an
+# agent-free endpoint, elapsed time, branch cleanliness, and process-name
+# guesses never prove prior-boot safety or authorize a signal. Repeated quiesce
+# on empty is idempotent. Overlay sources
 # for tests and recovery: `FM_TASK_PROCESS_BOOT_GENERATION` or
 # `FM_TASK_PROCESS_BOOT_GENERATION_FILE` replace the host generation, and
 # `FM_TASK_PROCESS_PROC_ROOT` remains the `/proc` identity overlay; a set overlay
