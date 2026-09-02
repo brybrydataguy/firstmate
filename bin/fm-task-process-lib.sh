@@ -10,9 +10,8 @@
 # Writers publish each state atomically and readers reject symlinks, malformed
 # fields, stale tokens, changed process identities, and an owned group that has
 # moved, so no lifecycle operation signals processes from an unproved scope.
-# Record-read unexports the launch token after copying it, and snapshot
-# excludes the lifecycle shell, so an inherited token cannot select the
-# quiesce process for signaling.
+# Snapshot excludes the lifecycle shell, so an inherited token cannot select
+# the quiesce process for signaling.
 # Quiesce may retire an active scope to empty without signaling only when it
 # proves that scope predates the current host boot, so none of its processes
 # can still exist: a well-formed recorded `boot_generation=` that differs from
@@ -342,7 +341,7 @@ fm_task_process_scope_record_read() {
   local version='' status='' token='' containment='' leader_pid='' leader_identity=''
   local boot_generation=''
   local anchor_pid anchor_identity agent_pid agent_identity endpoint_pid endpoint_identity
-  local pgid identity_value legacy=0
+  local pgid identity_value legacy=0 owned_keys=''
   path=$(fm_task_process_scope_path "$state" "$id") || return 1
   if [ ! -f "$path" ] || [ -L "$path" ]; then
     echo "error: task $id has no trustworthy process-scope record at $path" >&2
@@ -363,6 +362,18 @@ fm_task_process_scope_record_read() {
     case "$line" in *=*) ;; *) continue ;; esac
     key=${line%%=*}
     value=${line#*=}
+    case "$key" in
+      version|status|token|containment|leader_pid|leader_identity|anchor_pid|anchor_identity|agent_pid|agent_identity|endpoint_pid|endpoint_identity|pgid|boot_generation)
+        case " $owned_keys " in
+          *" $key "*)
+            echo "error: task $id has a malformed process-scope record at $path" >&2
+            return 1
+            ;;
+        esac
+        owned_keys="$owned_keys $key"
+        ;;
+      *) continue ;;
+    esac
     case "$key" in
       version) version=$value ;;
       status) status=$value ;;
@@ -392,6 +403,11 @@ EOF
     echo "error: task $id has a malformed process-scope record at $path" >&2
     return 1
   fi
+  if [ -n "$boot_generation" ] \
+     && { [ "$version" != 2 ] || [ "$status" != active ]; }; then
+    echo "error: task $id has a malformed process-scope record at $path" >&2
+    return 1
+  fi
   case "$containment" in
     pid-namespace|process-group|unknown) ;;
     '') containment=unknown ;;
@@ -411,10 +427,6 @@ EOF
       FM_TASK_PROCESS_SCOPE_STATUS=empty
       FM_TASK_PROCESS_SCOPE_VERSION=$version
       FM_TASK_PROCESS_SCOPE_TOKEN=$token
-      # The launch token is an env selector for worker processes. Callers that
-      # inherit an exported token (a process-scoped crewmate running tests)
-      # must not republish the record's token onto the lifecycle process.
-      export -n FM_TASK_PROCESS_SCOPE_TOKEN 2>/dev/null || true
       FM_TASK_PROCESS_SCOPE_CONTAINMENT=$containment
       FM_TASK_PROCESS_SCOPE_PATH=$path
       FM_TASK_PROCESS_SCOPE_LEGACY=0
@@ -500,7 +512,6 @@ EOF
   # shellcheck disable=SC2034 # Public record-reader output retained for callers.
   FM_TASK_PROCESS_SCOPE_VERSION=$version
   FM_TASK_PROCESS_SCOPE_TOKEN=$token
-  export -n FM_TASK_PROCESS_SCOPE_TOKEN 2>/dev/null || true
   FM_TASK_PROCESS_SCOPE_CONTAINMENT=$containment
   FM_TASK_PROCESS_SCOPE_PATH=$path
   FM_TASK_PROCESS_SCOPE_LEGACY=$legacy

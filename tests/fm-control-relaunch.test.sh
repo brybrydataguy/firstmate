@@ -1847,6 +1847,125 @@ test_mixed_identity_without_generation_refuses() {
   pass "fm-spawn --relaunch: mixed identities without a generation still refuse"
 }
 
+test_contradictory_boot_generation_records_refuse_without_mutation() {
+  local dir out rc before identity pid token
+
+  dir=$(new_case duplicate-generation rl69)
+  add_ship_task "$dir" rl69 claude
+  prepare_dead_relaunch "$dir" rl69
+  start_scope_sleeper
+  identity=$(fm_task_process_identity "$SCOPE_SLEEPER_PID") \
+    || fail "could not read the reused process identity"
+  write_active_reused_scope "$dir" rl69 "$identity" boot-prior
+  printf 'boot_generation=other-prior\n' >> "$dir/home/state/rl69.process-scope"
+  before=$(cat "$dir/home/state/rl69.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl69 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "duplicate boot-generation fields must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "duplicate boot-generation refusal should name the malformed record"
+  [ "$(cat "$dir/home/state/rl69.process-scope")" = "$before" ] \
+    || fail "duplicate boot-generation refusal mutated the process-scope record"
+  assert_scope_sleeper_alive
+
+  dir=$(new_case legacy-generation rl70)
+  add_ship_task "$dir" rl70 claude
+  prepare_dead_relaunch "$dir" rl70
+  start_scope_sleeper
+  pid=$SCOPE_SLEEPER_PID
+  token=test-rl70
+  identity=$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))
+  {
+    printf 'version=1\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=process-group\n'
+    printf 'leader_pid=%s\n' "$pid"
+    printf 'leader_identity=%s\n' "$identity"
+    printf 'pgid=%s\n' "$pid"
+    printf 'boot_generation=boot-prior\n'
+  } > "$dir/home/state/rl70.process-scope"
+  before=$(cat "$dir/home/state/rl70.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl70 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "version 1 records with boot generation must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "legacy boot-generation refusal should name the malformed record"
+  [ "$(cat "$dir/home/state/rl70.process-scope")" = "$before" ] \
+    || fail "legacy boot-generation refusal mutated the process-scope record"
+  assert_scope_sleeper_alive
+
+  dir=$(new_case empty-generation rl71)
+  add_ship_task "$dir" rl71 claude
+  prepare_dead_relaunch "$dir" rl71
+  printf 'boot_generation=boot-prior\n' >> "$dir/home/state/rl71.process-scope"
+  before=$(cat "$dir/home/state/rl71.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl71 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "empty records with boot generation must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "empty boot-generation refusal should name the malformed record"
+  [ "$(cat "$dir/home/state/rl71.process-scope")" = "$before" ] \
+    || fail "empty boot-generation refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: contradictory boot-generation records refuse without mutation"
+}
+
+test_scope_launch_preserves_token_for_escaped_descendants() {
+  local dir record token launch wrapper_pid escaped_pid attempts status
+  dir=$(new_case escaped-descendant rl72)
+  record="$dir/home/state/rl72.process-scope"
+  token=test-rl72
+  fm_task_process_scope_create_empty "$dir/home/state" rl72 "$token" process-group \
+    || fail "could not create the escaped-descendant process scope"
+  cat > "$dir/escape.py" <<'PY'
+import os
+import sys
+import time
+
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()))
+time.sleep(300)
+PY
+  launch="python3 $dir/escape.py $dir/escaped.pid"
+  python3 - "$ROOT/bin/fm-task-process-launch.sh" "$record" "$token" "$launch" <<'PY' &
+import os
+import sys
+
+pid = os.fork()
+if pid == 0:
+    os.setpgrp()
+    os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[3], sys.argv[4], "-"])
+os.waitpid(pid, 0)
+PY
+  wrapper_pid=$!
+  SCOPE_SLEEPERS+=("$wrapper_pid")
+  attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    [ -s "$dir/escaped.pid" ] && break
+    /bin/sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -s "$dir/escaped.pid" ] || fail "escaped descendant did not start"
+  escaped_pid=$(cat "$dir/escaped.pid")
+  SCOPE_SLEEPERS+=("$escaped_pid")
+  /bin/sleep 0.3
+  kill -0 "$escaped_pid" 2>/dev/null || fail "escaped descendant exited unexpectedly"
+  status=$(fm_task_process_scope_record_value "$record" status)
+  [ "$status" = active ] \
+    || fail "process scope became empty while its escaped token-bound descendant was alive"
+  kill -TERM "$escaped_pid" 2>/dev/null || true
+  wait "$wrapper_pid" 2>/dev/null || fail "scope launcher failed after its descendant exited"
+  status=$(fm_task_process_scope_record_value "$record" status)
+  [ "$status" = empty ] || fail "process scope did not become empty after its descendant exited"
+  pass "process-scope launch retains token ownership across escaped descendants"
+}
+
 test_pre_reboot_spawn_relaunch_still_requires_an_agent_free_endpoint() {
   local dir out rc before
   dir=$(new_case reboot-live rl63)
@@ -2003,3 +2122,5 @@ test_pre_reboot_symlinked_scope_refuses_without_mutation
 test_pre_reboot_token_mismatch_refuses_without_mutation
 test_clock_ambiguous_boot_time_refuses
 test_mixed_identity_without_generation_refuses
+test_contradictory_boot_generation_records_refuse_without_mutation
+test_scope_launch_preserves_token_for_escaped_descendants
