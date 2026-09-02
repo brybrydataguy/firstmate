@@ -25,8 +25,9 @@
 # timezone provenance is unchanged since capture and whose absolute start is
 # strictly earlier than the current boot time. Matching, missing, or unreadable
 # boot-generation evidence keeps the current refusal unless that legacy proof
-# applies. Equal, later, or unparseable timestamps, changed or unproved timezone
-# provenance, mixed or non-`lstart=` identities, current-boot identity mismatch,
+# applies. Equal, later, ambiguous, or unparseable timestamps, changed or
+# unproved timezone provenance, mixed or non-`lstart=` identities,
+# current-boot identity mismatch,
 # a missing PID, an agent-free endpoint, elapsed time, branch cleanliness, and
 # process-name guesses never prove prior-boot safety and never authorize a
 # signal. Repeated quiesce on empty is idempotent. Overlay sources for tests
@@ -309,8 +310,62 @@ fm_task_process_timezone_change_time() {
   fi
 }
 
+fm_task_process_epoch_lstart() {
+  local epoch=$1 value
+  value=$(LC_ALL=C date -r "$epoch" +'%a_%b_%d_%T_%Y' 2>/dev/null) \
+    || value=$(LC_ALL=C date -d "@$epoch" +'%a_%b_%d_%T_%Y' 2>/dev/null) \
+    || return 1
+  printf 'lstart=%s\n' "$value"
+}
+
+fm_task_process_timezone_offset_seconds() {
+  local epoch=$1 value sign hours minutes offset
+  value=$(LC_ALL=C date -r "$epoch" +%z 2>/dev/null) \
+    || value=$(LC_ALL=C date -d "@$epoch" +%z 2>/dev/null) \
+    || return 1
+  case "$value" in
+    [+-][0-2][0-9][0-5][0-9]) ;;
+    *) return 1 ;;
+  esac
+  sign=${value:0:1}
+  hours=${value:1:2}
+  minutes=${value:3:2}
+  offset=$((10#$hours * 3600 + 10#$minutes * 60))
+  if [ "$sign" = - ]; then
+    offset=$((-offset))
+  fi
+  printf '%s\n' "$offset"
+}
+
+fm_task_process_lstart_epoch_unique() {
+  local identity=$1 epoch=$2 base_offset delta probe offset known candidate rendered matches=0
+  local -a offsets=()
+  base_offset=$(fm_task_process_timezone_offset_seconds "$epoch") || return 1
+  delta=-172800
+  while [ "$delta" -le 172800 ]; do
+    probe=$((epoch + delta))
+    offset=$(fm_task_process_timezone_offset_seconds "$probe") || return 1
+    for known in "${offsets[@]}"; do
+      [ "$known" != "$offset" ] || break
+    done
+    if [ "${known-}" != "$offset" ]; then
+      offsets+=("$offset")
+    fi
+    known=
+    delta=$((delta + 21600))
+  done
+  for offset in "${offsets[@]}"; do
+    candidate=$((epoch + base_offset - offset))
+    rendered=$(fm_task_process_epoch_lstart "$candidate") || return 1
+    if [ "$rendered" = "$identity" ]; then
+      matches=$((matches + 1))
+    fi
+  done
+  [ "$matches" -eq 1 ]
+}
+
 fm_task_process_lstart_epoch() {
-  local identity=$1 raw weekday month day time year padded extra epoch
+  local identity=$1 raw weekday month day time year padded extra epoch normalized
   case "$identity" in
     lstart=*) raw=${identity#lstart=} ;;
     *) return 1 ;;
@@ -347,6 +402,9 @@ EOF
     || epoch=$(LC_ALL=C date -d "$weekday $month $padded $time $year" +%s 2>/dev/null) \
     || return 1
   fm_task_process_boot_time_valid "$epoch" || return 1
+  normalized="lstart=${weekday}_${month}_${padded}_${time}_${year}"
+  [ "$(fm_task_process_epoch_lstart "$epoch")" = "$normalized" ] || return 1
+  fm_task_process_lstart_epoch_unique "$normalized" "$epoch" || return 1
   printf '%s\n' "$epoch"
 }
 

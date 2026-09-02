@@ -1685,6 +1685,26 @@ test_legacy_unparseable_lstart_refuses() {
   pass "fm-spawn --relaunch: unparseable lstart still refuses"
 }
 
+test_legacy_dst_fold_lstart_refuses() {
+  local dir out rc before
+  dir=$(new_case legacy-dst-fold rl83)
+  add_ship_task "$dir" rl83 claude
+  prepare_dead_relaunch "$dir" rl83
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl83 "lstart=Sun_Nov_01_01:30:00_2026"
+  before=$(cat "$dir/home/state/rl83.process-scope")
+  set_boot_overlays boot-now 1800000000
+  out=$(TZ=America/Los_Angeles run_spawn "$dir" rl83 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "DST-fold-ambiguous lstart must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "ambiguous lstart should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl83.process-scope")" = "$before" ] \
+    || fail "ambiguous lstart mutated the process-scope record"
+  pass "fm-spawn --relaunch: DST-fold-ambiguous lstart refuses without mutation"
+}
+
 test_portable_boot_generation_mismatch_relaunches() {
   local dir out rc
   dir=$(new_case portable-mismatch rl57)
@@ -2314,6 +2334,7 @@ test_legacy_darwin_pre_boot_lstart_relaunches
 test_legacy_equal_lstart_refuses
 test_legacy_after_lstart_refuses
 test_legacy_unparseable_lstart_refuses
+test_legacy_dst_fold_lstart_refuses
 test_portable_boot_generation_mismatch_relaunches
 test_matching_boot_generation_refuses_even_with_pre_boot_lstart
 test_missing_boot_generation_without_legacy_refuses
