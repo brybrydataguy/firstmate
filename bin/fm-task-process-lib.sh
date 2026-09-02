@@ -22,18 +22,21 @@
 # proves that scope predates the current host boot, so none of its processes
 # can still exist: a well-formed recorded `boot_generation=` that differs from
 # the current host generation, or a legacy Darwin `lstart=` identity whose
-# absolute start is strictly earlier than the current boot time. Matching,
-# missing, or unreadable boot-generation evidence keeps the current refusal
-# unless that legacy proof applies. Equal, later, or unparseable timestamps,
-# mixed or non-`lstart=` identities, current-boot identity mismatch, a missing
-# PID, an agent-free endpoint, elapsed time, branch cleanliness, and
+# timezone provenance is unchanged since capture and whose absolute start is
+# strictly earlier than the current boot time. Matching, missing, or unreadable
+# boot-generation evidence keeps the current refusal unless that legacy proof
+# applies. Equal, later, or unparseable timestamps, changed or unproved timezone
+# provenance, mixed or non-`lstart=` identities, current-boot identity mismatch,
+# a missing PID, an agent-free endpoint, elapsed time, branch cleanliness, and
 # process-name guesses never prove prior-boot safety and never authorize a
 # signal. Repeated quiesce on empty is idempotent. Overlay sources for tests
 # and recovery: `FM_TASK_PROCESS_BOOT_GENERATION` or
 # `FM_TASK_PROCESS_BOOT_GENERATION_FILE` replace the host generation,
 # `FM_TASK_PROCESS_BOOT_TIME` or `FM_TASK_PROCESS_BOOT_TIME_FILE` replace the
-# host boot time, and `FM_TASK_PROCESS_PROC_ROOT` remains the `/proc` identity
-# overlay; a set overlay is exclusive and does not fall through to the host.
+# host boot time, `FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME` replaces the latest
+# timezone-provenance change time, and `FM_TASK_PROCESS_PROC_ROOT` remains the
+# `/proc` identity overlay; a set overlay is exclusive and does not fall through
+# to the host.
 # `fm-task-process-launch.sh` produces the record and retains the ownership
 # anchor until the agent and every scoped descendant are gone.
 # Lifecycle callers quiesce the scope before relaunch or worktree removal;
@@ -173,9 +176,24 @@ fm_task_process_boot_time_valid() {
   esac
 }
 
+fm_task_process_text_file_valid() {
+  local path=$1 bytes
+  bytes=$(LC_ALL=C od -An -v -t u1 < "$path" 2>/dev/null) || return 1
+  LC_ALL=C awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i != 9 && $i != 10 && $i != 13 && ($i < 32 || $i > 126)) exit 1
+      }
+    }
+  ' <<EOF
+$bytes
+EOF
+}
+
 fm_task_process_read_single_line_file() {
   local path=$1 value
   [ -n "$path" ] && [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  fm_task_process_text_file_valid "$path" || return 1
   value=$(cat "$path" 2>/dev/null) || return 1
   value=${value%$'\n'}
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
@@ -232,6 +250,7 @@ fm_task_process_current_boot_time() {
   proc_root=${FM_TASK_PROCESS_PROC_ROOT:-/proc}
   path=$proc_root/stat
   if [ -f "$path" ] && [ ! -L "$path" ]; then
+    fm_task_process_text_file_valid "$path" || return 1
     value=$(awk '$1 == "btime" && $2 ~ /^[1-9][0-9]*$/ {print $2; exit}' "$path")
     if [ -n "$value" ]; then
       fm_task_process_boot_time_valid "$value" || return 1
@@ -246,6 +265,48 @@ fm_task_process_current_boot_time() {
   value=$(printf '%s\n' "$value" | awk -F'[=,]' '/sec/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
   fm_task_process_boot_time_valid "$value" || return 1
   printf '%s\n' "$value"
+}
+
+fm_task_process_file_change_time() {
+  local path=$1 follow=$2 value modified changed
+  if [ "$follow" = 1 ]; then
+    value=$(stat -L -f '%m %c' "$path" 2>/dev/null) \
+      || value=$(stat -L -c '%Y %Z' -- "$path" 2>/dev/null) \
+      || return 1
+  else
+    value=$(stat -f '%m %c' "$path" 2>/dev/null) \
+      || value=$(stat -c '%Y %Z' -- "$path" 2>/dev/null) \
+      || return 1
+  fi
+  read -r modified changed <<EOF
+$value
+EOF
+  fm_task_process_boot_time_valid "$modified" || return 1
+  fm_task_process_boot_time_valid "$changed" || return 1
+  if [ "$modified" -gt "$changed" ]; then
+    printf '%s\n' "$modified"
+  else
+    printf '%s\n' "$changed"
+  fi
+}
+
+fm_task_process_timezone_change_time() {
+  local path link_change target_change
+  if [ "${FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME+x}" = x ]; then
+    fm_task_process_boot_time_valid "$FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME" || return 1
+    printf '%s\n' "$FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME"
+    return 0
+  fi
+  [ "${TZ+x}" != x ] || return 1
+  path=/etc/localtime
+  [ -e "$path" ] || [ -L "$path" ] || return 1
+  link_change=$(fm_task_process_file_change_time "$path" 0) || return 1
+  target_change=$(fm_task_process_file_change_time "$path" 1) || return 1
+  if [ "$link_change" -gt "$target_change" ]; then
+    printf '%s\n' "$link_change"
+  else
+    printf '%s\n' "$target_change"
+  fi
 }
 
 fm_task_process_lstart_epoch() {
@@ -290,21 +351,27 @@ EOF
 }
 
 fm_task_process_legacy_prior_boot_proven() {
-  local current_boot anchor_epoch agent_epoch
+  local current_boot timezone_change_before timezone_change_after anchor_epoch agent_epoch
   current_boot=$(fm_task_process_current_boot_time) || return 1
+  timezone_change_before=$(fm_task_process_timezone_change_time) || return 1
+  [ "$timezone_change_before" -le "$current_boot" ] || return 1
   case "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" in
     lstart=*) ;;
     *) return 1 ;;
   esac
   anchor_epoch=$(fm_task_process_lstart_epoch "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY") || return 1
+  [ "$timezone_change_before" -le "$anchor_epoch" ] || return 1
   [ "$anchor_epoch" -lt "$current_boot" ] || return 1
   case "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY" in
     lstart=*)
       agent_epoch=$(fm_task_process_lstart_epoch "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY") || return 1
+      [ "$timezone_change_before" -le "$agent_epoch" ] || return 1
       [ "$agent_epoch" -lt "$current_boot" ] || return 1
       ;;
     *) return 1 ;;
   esac
+  timezone_change_after=$(fm_task_process_timezone_change_time) || return 1
+  [ "$timezone_change_after" = "$timezone_change_before" ] || return 1
   return 0
 }
 
@@ -384,6 +451,10 @@ fm_task_process_scope_record_read() {
     echo "error: task $id has no trustworthy process-scope record at $path" >&2
     return 1
   fi
+  fm_task_process_text_file_valid "$path" || {
+    echo "error: task $id has a malformed process-scope record at $path" >&2
+    return 1
+  }
   record=$(cat "$path" 2>/dev/null) || {
     echo "error: task $id has no readable process-scope record at $path" >&2
     return 1

@@ -287,11 +287,13 @@ SCOPE_BOOT_TIME=1700000000
 unset_boot_overlays() {
   unset FM_TASK_PROCESS_BOOT_GENERATION FM_TASK_PROCESS_BOOT_GENERATION_FILE
   unset FM_TASK_PROCESS_BOOT_TIME FM_TASK_PROCESS_BOOT_TIME_FILE
+  unset FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME
 }
 
 set_boot_overlays() {
   export FM_TASK_PROCESS_BOOT_GENERATION=${1:-boot-now}
   export FM_TASK_PROCESS_BOOT_TIME=${2:-$SCOPE_BOOT_TIME}
+  export FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME=1000000000
 }
 
 scope_lstart_at() {
@@ -1748,6 +1750,7 @@ test_unreadable_boot_generation_uses_legacy_when_lstart_predates() {
   write_active_reused_scope "$dir" rl60 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-prior
   export FM_TASK_PROCESS_BOOT_GENERATION=
   export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
+  export FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME=1000000000
   out=$(run_spawn "$dir" rl60 --relaunch --harness claude); rc=$?
   unset_boot_overlays
   expect_code 0 "$rc" "unreadable generation should still recover through legacy Darwin proof"$'\n'"$out"
@@ -1845,6 +1848,99 @@ test_mixed_identity_without_generation_refuses() {
   [ "$(cat "$dir/home/state/rl68.process-scope")" = "$before" ] \
     || fail "mixed identities mutated the process-scope record"
   pass "fm-spawn --relaunch: mixed identities without a generation still refuse"
+}
+
+test_timezone_change_keeps_legacy_current_boot_scope_active() {
+  local dir out rc before identity reinterpreted
+  dir=$(new_case timezone-change rl78)
+  add_ship_task "$dir" rl78 claude
+  prepare_dead_relaunch "$dir" rl78
+  start_scope_sleeper
+  identity=$(TZ=UTC scope_lstart_at $((SCOPE_BOOT_TIME + 3600)))
+  reinterpreted=$(TZ=Etc/GMT-2 fm_task_process_lstart_epoch "$identity") \
+    || fail "timezone-change fixture could not reinterpret the recorded lstart"
+  [ "$reinterpreted" -lt "$SCOPE_BOOT_TIME" ] \
+    || fail "timezone-change fixture did not expose a false prior-boot timestamp"
+  write_active_reused_scope "$dir" rl78 "$identity"
+  before=$(cat "$dir/home/state/rl78.process-scope")
+  set_boot_overlays boot-now
+  export FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME=$((SCOPE_BOOT_TIME + 5400))
+  out=$(TZ=Etc/GMT-2 run_spawn "$dir" rl78 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a timezone change after lstart capture must refuse legacy recovery"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "timezone-change refusal should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl78.process-scope")" = "$before" ] \
+    || fail "timezone-change refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: changed timezone provenance refuses legacy recovery"
+}
+
+test_binary_process_scope_evidence_refuses_without_mutation() {
+  local dir out rc before identity evidence
+
+  dir=$(new_case binary-record rl79)
+  add_ship_task "$dir" rl79 claude
+  prepare_dead_relaunch "$dir" rl79
+  start_scope_sleeper
+  identity=$(fm_task_process_identity "$SCOPE_SLEEPER_PID") \
+    || fail "could not read the reused process identity"
+  write_active_reused_scope "$dir" rl79 "$identity" boot-prior
+  printf '\0' >> "$dir/home/state/rl79.process-scope"
+  before="$dir/home/state/rl79.process-scope.before"
+  cp "$dir/home/state/rl79.process-scope" "$before"
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl79 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a process-scope record containing NUL must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "binary-record refusal should name the malformed record"
+  cmp -s "$before" "$dir/home/state/rl79.process-scope" \
+    || fail "binary-record refusal mutated the process-scope record"
+  assert_scope_sleeper_alive
+
+  dir=$(new_case binary-generation-evidence rl80)
+  add_ship_task "$dir" rl80 claude
+  prepare_dead_relaunch "$dir" rl80
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl80 \
+    "$(scope_lstart_at $((SCOPE_BOOT_TIME + 60)))" boot-prior
+  before=$(cat "$dir/home/state/rl80.process-scope")
+  evidence="$dir/boot-generation"
+  printf 'boot-now\0' > "$evidence"
+  set_boot_overlays boot-now
+  unset FM_TASK_PROCESS_BOOT_GENERATION
+  export FM_TASK_PROCESS_BOOT_GENERATION_FILE=$evidence
+  out=$(run_spawn "$dir" rl80 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "boot-generation evidence containing NUL must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "binary generation evidence should keep the unowned-group refusal"
+  [ "$(cat "$dir/home/state/rl80.process-scope")" = "$before" ] \
+    || fail "binary generation evidence mutated the process-scope record"
+  assert_scope_sleeper_alive
+
+  dir=$(new_case binary-boot-time-evidence rl81)
+  add_ship_task "$dir" rl81 claude
+  prepare_dead_relaunch "$dir" rl81
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl81 \
+    "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))"
+  before=$(cat "$dir/home/state/rl81.process-scope")
+  evidence="$dir/boot-time"
+  printf '%s\0' "$SCOPE_BOOT_TIME" > "$evidence"
+  set_boot_overlays boot-now
+  unset FM_TASK_PROCESS_BOOT_TIME
+  export FM_TASK_PROCESS_BOOT_TIME_FILE=$evidence
+  out=$(run_spawn "$dir" rl81 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "boot-time evidence containing NUL must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "binary boot-time evidence should keep the unowned-group refusal"
+  [ "$(cat "$dir/home/state/rl81.process-scope")" = "$before" ] \
+    || fail "binary boot-time evidence mutated the process-scope record"
+  assert_scope_sleeper_alive
+  pass "fm-spawn --relaunch: binary records and boot evidence refuse without mutation"
 }
 
 test_contradictory_process_scope_records_refuse_without_mutation() {
@@ -2230,5 +2326,7 @@ test_pre_reboot_symlinked_scope_refuses_without_mutation
 test_pre_reboot_token_mismatch_refuses_without_mutation
 test_clock_ambiguous_boot_time_refuses
 test_mixed_identity_without_generation_refuses
+test_timezone_change_keeps_legacy_current_boot_scope_active
+test_binary_process_scope_evidence_refuses_without_mutation
 test_contradictory_process_scope_records_refuse_without_mutation
 test_scope_launch_preserves_token_for_escaped_descendants
