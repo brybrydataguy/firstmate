@@ -1847,7 +1847,7 @@ test_mixed_identity_without_generation_refuses() {
   pass "fm-spawn --relaunch: mixed identities without a generation still refuse"
 }
 
-test_contradictory_boot_generation_records_refuse_without_mutation() {
+test_contradictory_process_scope_records_refuse_without_mutation() {
   local dir out rc before identity pid token
 
   dir=$(new_case duplicate-generation rl69)
@@ -1900,17 +1900,83 @@ test_contradictory_boot_generation_records_refuse_without_mutation() {
   dir=$(new_case empty-generation rl71)
   add_ship_task "$dir" rl71 claude
   prepare_dead_relaunch "$dir" rl71
-  printf 'boot_generation=boot-prior\n' >> "$dir/home/state/rl71.process-scope"
+  printf 'boot_generation=\n' >> "$dir/home/state/rl71.process-scope"
   before=$(cat "$dir/home/state/rl71.process-scope")
   set_boot_overlays boot-now
   out=$(run_spawn "$dir" rl71 --relaunch --harness claude); rc=$?
   unset_boot_overlays
-  expect_code 1 "$rc" "empty records with boot generation must refuse"
+  expect_code 1 "$rc" "empty records with an empty boot-generation field must refuse"
   assert_contains "$out" "malformed process-scope record" \
     "empty boot-generation refusal should name the malformed record"
   [ "$(cat "$dir/home/state/rl71.process-scope")" = "$before" ] \
     || fail "empty boot-generation refusal mutated the process-scope record"
-  pass "fm-spawn --relaunch: contradictory boot-generation records refuse without mutation"
+
+  dir=$(new_case legacy-modern-fields rl73)
+  add_ship_task "$dir" rl73 claude
+  prepare_dead_relaunch "$dir" rl73
+  start_scope_sleeper
+  pid=$SCOPE_SLEEPER_PID
+  token=test-rl73
+  identity=$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))
+  {
+    printf 'version=1\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=process-group\n'
+    printf 'leader_pid=%s\n' "$pid"
+    printf 'leader_identity=%s\n' "$identity"
+    printf 'anchor_pid=%s\n' "$pid"
+    printf 'anchor_identity=starttime=999\n'
+    printf 'agent_pid=%s\n' "$pid"
+    printf 'agent_identity=starttime=999\n'
+    printf 'pgid=%s\n' "$pid"
+  } > "$dir/home/state/rl73.process-scope"
+  before=$(cat "$dir/home/state/rl73.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl73 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "version 1 records with version 2 identity fields must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "mixed-schema legacy refusal should name the malformed record"
+  [ "$(cat "$dir/home/state/rl73.process-scope")" = "$before" ] \
+    || fail "mixed-schema legacy refusal mutated the process-scope record"
+  assert_scope_sleeper_alive
+
+  dir=$(new_case active-legacy-fields rl74)
+  add_ship_task "$dir" rl74 claude
+  prepare_dead_relaunch "$dir" rl74
+  start_scope_sleeper
+  identity=$(fm_task_process_identity "$SCOPE_SLEEPER_PID") \
+    || fail "could not read the reused process identity"
+  write_active_reused_scope "$dir" rl74 "$identity" boot-prior
+  printf 'leader_pid=%s\nleader_identity=%s\n' \
+    "$SCOPE_SLEEPER_PID" "$identity" >> "$dir/home/state/rl74.process-scope"
+  before=$(cat "$dir/home/state/rl74.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl74 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "version 2 active records with legacy identity fields must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "mixed-schema modern refusal should name the malformed record"
+  [ "$(cat "$dir/home/state/rl74.process-scope")" = "$before" ] \
+    || fail "mixed-schema modern refusal mutated the process-scope record"
+  assert_scope_sleeper_alive
+
+  dir=$(new_case empty-active-fields rl75)
+  add_ship_task "$dir" rl75 claude
+  prepare_dead_relaunch "$dir" rl75
+  printf 'anchor_pid=22\nanchor_identity=starttime=999\n' \
+    >> "$dir/home/state/rl75.process-scope"
+  before=$(cat "$dir/home/state/rl75.process-scope")
+  set_boot_overlays boot-now
+  out=$(run_spawn "$dir" rl75 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "empty records with active identity fields must refuse"
+  assert_contains "$out" "malformed process-scope record" \
+    "empty active-field refusal should name the malformed record"
+  [ "$(cat "$dir/home/state/rl75.process-scope")" = "$before" ] \
+    || fail "empty active-field refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: contradictory process-scope schemas refuse without mutation"
 }
 
 test_scope_launch_preserves_token_for_escaped_descendants() {
@@ -2122,5 +2188,5 @@ test_pre_reboot_symlinked_scope_refuses_without_mutation
 test_pre_reboot_token_mismatch_refuses_without_mutation
 test_clock_ambiguous_boot_time_refuses
 test_mixed_identity_without_generation_refuses
-test_contradictory_boot_generation_records_refuse_without_mutation
+test_contradictory_process_scope_records_refuse_without_mutation
 test_scope_launch_preserves_token_for_escaped_descendants

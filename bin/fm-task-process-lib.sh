@@ -7,8 +7,14 @@
 # process-group identities, and a portable `boot_generation=` binding when the
 # host exposes one, while `empty` carries containment, the token, and an
 # optional endpoint identity retained from the active scope.
+# Version 1 empty records contain version, status, and token, with optional
+# containment; active records additionally require leader_pid, leader_identity,
+# and pgid. Version 2 empty records permit an optional paired endpoint identity;
+# active records instead require paired anchor and agent identities plus pgid,
+# and permit optional containment, paired endpoint identity, and boot generation.
 # Writers publish each state atomically and readers reject symlinks, malformed
-# fields, stale tokens, changed process identities, and an owned group that has
+# fields, duplicate owned fields, owned fields outside the exact version/state
+# schema, stale tokens, changed process identities, and an owned group that has
 # moved, so no lifecycle operation signals processes from an unproved scope.
 # Snapshot excludes the lifecycle shell, so an inherited token cannot select
 # the quiesce process for signaling.
@@ -336,6 +342,37 @@ fm_task_process_scope_record_value() {
   awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); value=$0} END {print value}' "$path"
 }
 
+fm_task_process_scope_record_schema_valid() {
+  local version=$1 status=$2 fields=$3 allowed required field
+  local -a field_list
+  case "$version:$status" in
+    1:empty)
+      allowed='version status token containment'
+      required='version status token'
+      ;;
+    1:active)
+      allowed='version status token containment leader_pid leader_identity pgid'
+      required='version status token leader_pid leader_identity pgid'
+      ;;
+    2:empty)
+      allowed='version status token containment endpoint_pid endpoint_identity'
+      required='version status token'
+      ;;
+    2:active)
+      allowed='version status token containment anchor_pid anchor_identity agent_pid agent_identity endpoint_pid endpoint_identity pgid boot_generation'
+      required='version status token anchor_pid anchor_identity agent_pid agent_identity pgid'
+      ;;
+    *) return 1 ;;
+  esac
+  read -r -a field_list <<< "$fields"
+  for field in "${field_list[@]}"; do
+    case " $allowed " in *" $field "*) ;; *) return 1 ;; esac
+  done
+  for field in $required; do
+    case " $fields " in *" $field "*) ;; *) return 1 ;; esac
+  done
+}
+
 fm_task_process_scope_record_read() {
   local state=$1 id=$2 expected_token=$3 path record line key value
   local version='' status='' token='' containment='' leader_pid='' leader_identity=''
@@ -399,29 +436,52 @@ EOF
     echo "error: task $id has a stale or malformed process-scope record at $path" >&2
     return 1
   fi
-  if [ -n "$boot_generation" ] && ! fm_task_process_boot_generation_valid "$boot_generation"; then
+  if ! fm_task_process_scope_record_schema_valid \
+      "$version" "$status" "$owned_keys"; then
     echo "error: task $id has a malformed process-scope record at $path" >&2
     return 1
   fi
-  if [ -n "$boot_generation" ] \
-     && { [ "$version" != 2 ] || [ "$status" != active ]; }; then
-    echo "error: task $id has a malformed process-scope record at $path" >&2
-    return 1
-  fi
-  case "$containment" in
-    pid-namespace|process-group|unknown) ;;
-    '') containment=unknown ;;
-    *)
+  case " $owned_keys " in
+    *' boot_generation '*)
+      fm_task_process_boot_generation_valid "$boot_generation" || {
+        echo "error: task $id has a malformed process-scope record at $path" >&2
+        return 1
+      }
+      ;;
+  esac
+  case " $owned_keys " in
+    *' containment '*)
+      case "$containment" in
+        pid-namespace|process-group|unknown) ;;
+        *)
+          echo "error: task $id has a malformed process-scope record at $path" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    *) containment=unknown ;;
+  esac
+  case " $owned_keys " in
+    *' endpoint_pid '*)
+      case " $owned_keys " in *' endpoint_identity '*) ;; *)
+        echo "error: task $id has a malformed process-scope record at $path" >&2
+        return 1
+        ;;
+      esac
+      ;;
+    *' endpoint_identity '*)
       echo "error: task $id has a malformed process-scope record at $path" >&2
       return 1
       ;;
   esac
-  if [ -n "$endpoint_pid" ] || [ -n "$endpoint_identity" ]; then
-    fm_task_process_recorded_identity_valid "$endpoint_pid" "$endpoint_identity" || {
-      echo "error: task $id has a malformed process-scope record at $path" >&2
-      return 1
-    }
-  fi
+  case " $owned_keys " in
+    *' endpoint_pid '*)
+      fm_task_process_recorded_identity_valid "$endpoint_pid" "$endpoint_identity" || {
+        echo "error: task $id has a malformed process-scope record at $path" >&2
+        return 1
+      }
+      ;;
+  esac
   case "$status" in
     empty)
       FM_TASK_PROCESS_SCOPE_STATUS=empty
