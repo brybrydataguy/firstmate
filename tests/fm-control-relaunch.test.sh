@@ -217,6 +217,14 @@ run_spawn() {  # <case-dir> <args...>
     "$SPAWN" "$@" 2>&1
 }
 
+run_spawn_system_bash() {  # <case-dir> <args...>
+  local dir=$1; shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_TASK_PROCESS_SCOPE_START_ATTEMPTS=0 \
+    /bin/bash "$SPAWN" "$@" 2>&1
+}
+
 meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
@@ -287,12 +295,15 @@ SCOPE_BOOT_TIME=1700000000
 unset_boot_overlays() {
   unset FM_TASK_PROCESS_BOOT_GENERATION FM_TASK_PROCESS_BOOT_GENERATION_FILE
   unset FM_TASK_PROCESS_BOOT_TIME FM_TASK_PROCESS_BOOT_TIME_FILE
+  unset FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
   unset FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME
 }
 
 set_boot_overlays() {
   export FM_TASK_PROCESS_BOOT_GENERATION=${1:-boot-now}
   export FM_TASK_PROCESS_BOOT_TIME=${2:-$SCOPE_BOOT_TIME}
+  export FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
+  FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY=$(scope_lstart_at $((${2:-$SCOPE_BOOT_TIME} + 1)))
   export FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME=1000000000
 }
 
@@ -1617,7 +1628,7 @@ test_legacy_darwin_pre_boot_lstart_relaunches() {
   start_scope_sleeper
   write_active_reused_scope "$dir" rl53 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))"
   set_boot_overlays boot-now
-  out=$(run_spawn "$dir" rl53 --relaunch --harness claude); rc=$?
+  out=$(run_spawn_system_bash "$dir" rl53 --relaunch --harness claude); rc=$?
   unset_boot_overlays
   expect_code 0 "$rc" "legacy Darwin lstart before boot should recover"$'\n'"$out"
   assert_scope_sleeper_alive
@@ -1768,9 +1779,8 @@ test_unreadable_boot_generation_uses_legacy_when_lstart_predates() {
   prepare_dead_relaunch "$dir" rl60
   start_scope_sleeper
   write_active_reused_scope "$dir" rl60 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))" boot-prior
+  set_boot_overlays boot-now
   export FM_TASK_PROCESS_BOOT_GENERATION=
-  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
-  export FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME=1000000000
   out=$(run_spawn "$dir" rl60 --relaunch --harness claude); rc=$?
   unset_boot_overlays
   expect_code 0 "$rc" "unreadable generation should still recover through legacy Darwin proof"$'\n'"$out"
@@ -1787,8 +1797,8 @@ test_unreadable_boot_generation_without_legacy_refuses() {
   start_scope_sleeper
   write_active_reused_scope "$dir" rl61 "starttime=12345" boot-prior
   before=$(cat "$dir/home/state/rl61.process-scope")
+  set_boot_overlays boot-now
   export FM_TASK_PROCESS_BOOT_GENERATION=
-  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
   out=$(run_spawn "$dir" rl61 --relaunch --harness claude); rc=$?
   unset_boot_overlays
   expect_code 1 "$rc" "unreadable generation without legacy proof must refuse"
@@ -1894,6 +1904,28 @@ test_timezone_change_keeps_legacy_current_boot_scope_active() {
   [ "$(cat "$dir/home/state/rl78.process-scope")" = "$before" ] \
     || fail "timezone-change refusal mutated the process-scope record"
   pass "fm-spawn --relaunch: changed timezone provenance refuses legacy recovery"
+}
+
+test_wall_clock_adjustment_refuses_legacy_recovery() {
+  local dir out rc before
+  dir=$(new_case wall-clock-adjustment rl84)
+  add_ship_task "$dir" rl84 claude
+  prepare_dead_relaunch "$dir" rl84
+  start_scope_sleeper
+  write_active_reused_scope "$dir" rl84 "$(scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))"
+  before=$(cat "$dir/home/state/rl84.process-scope")
+  set_boot_overlays boot-now
+  export FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
+  FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY=$(scope_lstart_at $((SCOPE_BOOT_TIME - 7200)))
+  out=$(run_spawn "$dir" rl84 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "unstable wall-clock provenance must refuse legacy recovery"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "wall-clock ambiguity should keep the unowned-group refusal"
+  assert_scope_sleeper_alive
+  [ "$(cat "$dir/home/state/rl84.process-scope")" = "$before" ] \
+    || fail "wall-clock ambiguity mutated the process-scope record"
+  pass "fm-spawn --relaunch: wall-clock adjustments refuse legacy recovery"
 }
 
 test_binary_process_scope_evidence_refuses_without_mutation() {
@@ -2348,6 +2380,7 @@ test_pre_reboot_token_mismatch_refuses_without_mutation
 test_clock_ambiguous_boot_time_refuses
 test_mixed_identity_without_generation_refuses
 test_timezone_change_keeps_legacy_current_boot_scope_active
+test_wall_clock_adjustment_refuses_legacy_recovery
 test_binary_process_scope_evidence_refuses_without_mutation
 test_contradictory_process_scope_records_refuse_without_mutation
 test_scope_launch_preserves_token_for_escaped_descendants

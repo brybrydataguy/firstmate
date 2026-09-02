@@ -22,8 +22,9 @@
 # proves that scope predates the current host boot, so none of its processes
 # can still exist: a well-formed recorded `boot_generation=` that differs from
 # the current host generation, or a legacy Darwin `lstart=` identity whose
-# timezone provenance is unchanged since capture and whose absolute start is
-# strictly earlier than the current boot time. Matching, missing, or unreadable
+# timezone provenance is unchanged since capture, whose current boot clock
+# anchor remains consistent with the authoritative boot time, and whose absolute
+# start is strictly earlier than that time. Matching, missing, or unreadable
 # boot-generation evidence keeps the current refusal unless that legacy proof
 # applies. Equal, later, ambiguous, or unparseable timestamps, changed or
 # unproved timezone provenance, mixed or non-`lstart=` identities,
@@ -34,10 +35,11 @@
 # and recovery: `FM_TASK_PROCESS_BOOT_GENERATION` or
 # `FM_TASK_PROCESS_BOOT_GENERATION_FILE` replace the host generation,
 # `FM_TASK_PROCESS_BOOT_TIME` or `FM_TASK_PROCESS_BOOT_TIME_FILE` replace the
-# host boot time, `FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME` replaces the latest
-# timezone-provenance change time, and `FM_TASK_PROCESS_PROC_ROOT` remains the
-# `/proc` identity overlay; a set overlay is exclusive and does not fall through
-# to the host.
+# host boot time, `FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY` replaces the current
+# boot's PID 1 `lstart=` clock anchor, `FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME`
+# replaces the latest timezone-provenance change time, and
+# `FM_TASK_PROCESS_PROC_ROOT` remains the `/proc` identity overlay; a set overlay
+# is exclusive and does not fall through to the host.
 # `fm-task-process-launch.sh` produces the record and retains the ownership
 # anchor until the agent and every scoped descendant are gone.
 # Lifecycle callers quiesce the scope before relaunch or worktree removal;
@@ -234,6 +236,17 @@ fm_task_process_current_boot_generation() {
   printf '%s\n' "$value"
 }
 
+fm_task_process_current_boot_clock_identity() {
+  local value
+  if [ "${FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY+x}" = x ]; then
+    value=$FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
+  else
+    value=$(fm_task_process_identity 1) || return 1
+  fi
+  case "$value" in lstart=*) ;; *) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
 fm_task_process_current_boot_time() {
   local value path proc_root
   if [ "${FM_TASK_PROCESS_BOOT_TIME+x}" = x ]; then
@@ -345,7 +358,7 @@ fm_task_process_lstart_epoch_unique() {
   while [ "$delta" -le 172800 ]; do
     probe=$((epoch + delta))
     offset=$(fm_task_process_timezone_offset_seconds "$probe") || return 1
-    for known in "${offsets[@]}"; do
+    for known in ${offsets[@]+"${offsets[@]}"}; do
       [ "$known" != "$offset" ] || break
     done
     if [ "${known-}" != "$offset" ]; then
@@ -354,7 +367,7 @@ fm_task_process_lstart_epoch_unique() {
     known=
     delta=$((delta + 21600))
   done
-  for offset in "${offsets[@]}"; do
+  for offset in ${offsets[@]+"${offsets[@]}"}; do
     candidate=$((epoch + base_offset - offset))
     rendered=$(fm_task_process_epoch_lstart "$candidate") || return 1
     if [ "$rendered" = "$identity" ]; then
@@ -409,8 +422,13 @@ EOF
 }
 
 fm_task_process_legacy_prior_boot_proven() {
-  local current_boot timezone_change_before timezone_change_after anchor_epoch agent_epoch
+  local current_boot current_boot_after boot_clock_before boot_clock_after boot_clock_epoch
+  local timezone_change_before timezone_change_after anchor_epoch agent_epoch
   current_boot=$(fm_task_process_current_boot_time) || return 1
+  boot_clock_before=$(fm_task_process_current_boot_clock_identity) || return 1
+  boot_clock_epoch=$(fm_task_process_lstart_epoch "$boot_clock_before") || return 1
+  [ "$boot_clock_epoch" -ge "$current_boot" ] || return 1
+  [ "$boot_clock_epoch" -le $((current_boot + 1)) ] || return 1
   timezone_change_before=$(fm_task_process_timezone_change_time) || return 1
   [ "$timezone_change_before" -le "$current_boot" ] || return 1
   case "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" in
@@ -430,6 +448,10 @@ fm_task_process_legacy_prior_boot_proven() {
   esac
   timezone_change_after=$(fm_task_process_timezone_change_time) || return 1
   [ "$timezone_change_after" = "$timezone_change_before" ] || return 1
+  boot_clock_after=$(fm_task_process_current_boot_clock_identity) || return 1
+  [ "$boot_clock_after" = "$boot_clock_before" ] || return 1
+  current_boot_after=$(fm_task_process_current_boot_time) || return 1
+  [ "$current_boot_after" = "$current_boot" ] || return 1
   return 0
 }
 
