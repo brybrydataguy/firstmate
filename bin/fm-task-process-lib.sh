@@ -18,26 +18,18 @@
 # moved, so no lifecycle operation signals processes from an unproved scope.
 # Snapshot excludes the lifecycle shell, so an inherited token cannot select
 # the quiesce process for signaling.
-# Quiesce may retire an active scope to empty without signaling only when it
-# proves that scope predates the current host boot, so none of its processes
-# can still exist: a well-formed recorded `boot_generation=` that differs from
-# the current host generation, or a legacy Darwin `lstart=` identity whose
-# timezone provenance is unchanged since capture, whose current boot clock
-# anchor remains consistent with the authoritative boot time, and whose absolute
-# start is strictly earlier than that time. Matching, missing, or unreadable
-# boot-generation evidence keeps the current refusal unless that legacy proof
-# applies. Equal, later, ambiguous, or unparseable timestamps, changed or
-# unproved timezone provenance, mixed or non-`lstart=` identities,
-# current-boot identity mismatch,
-# a missing PID, an agent-free endpoint, elapsed time, branch cleanliness, and
-# process-name guesses never prove prior-boot safety and never authorize a
-# signal. Repeated quiesce on empty is idempotent. Overlay sources for tests
-# and recovery: `FM_TASK_PROCESS_BOOT_GENERATION` or
-# `FM_TASK_PROCESS_BOOT_GENERATION_FILE` replace the host generation,
-# `FM_TASK_PROCESS_BOOT_TIME` or `FM_TASK_PROCESS_BOOT_TIME_FILE` replace the
-# host boot time, `FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY` replaces the current
-# boot's PID 1 `lstart=` clock anchor, `FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME`
-# replaces the latest timezone-provenance change time, and
+# Quiesce may retire an active scope to empty without signaling only when a
+# well-formed recorded `boot_generation=` differs from the current host
+# generation, proving that none of its processes can still exist. Matching,
+# missing, or unreadable boot-generation evidence keeps the current refusal.
+# Generation-less records, including old Darwin `lstart=` records, cannot use
+# prior-boot retirement because their capture-time timezone and wall-clock
+# history cannot be proved retroactively. A missing PID, an agent-free endpoint,
+# elapsed time, branch cleanliness, and process-name guesses never prove
+# prior-boot safety and never
+# authorize a signal. Repeated quiesce on empty is idempotent. Overlay sources
+# for tests and recovery: `FM_TASK_PROCESS_BOOT_GENERATION` or
+# `FM_TASK_PROCESS_BOOT_GENERATION_FILE` replace the host generation, and
 # `FM_TASK_PROCESS_PROC_ROOT` remains the `/proc` identity overlay; a set overlay
 # is exclusive and does not fall through to the host.
 # `fm-task-process-launch.sh` produces the record and retains the ownership
@@ -173,12 +165,6 @@ fm_task_process_boot_generation_valid() {
   [ "${#1}" -le 64 ]
 }
 
-fm_task_process_boot_time_valid() {
-  case "${1-}" in
-    ''|*[!0-9]*|0*) return 1 ;;
-  esac
-}
-
 fm_task_process_text_file_valid() {
   local path=$1 bytes
   bytes=$(LC_ALL=C od -An -v -t u1 < "$path" 2>/dev/null) || return 1
@@ -236,236 +222,13 @@ fm_task_process_current_boot_generation() {
   printf '%s\n' "$value"
 }
 
-fm_task_process_current_boot_clock_identity() {
-  local value
-  if [ "${FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY+x}" = x ]; then
-    value=$FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
-  else
-    value=$(fm_task_process_identity 1) || return 1
-  fi
-  case "$value" in lstart=*) ;; *) return 1 ;; esac
-  printf '%s\n' "$value"
-}
-
-fm_task_process_current_boot_time() {
-  local value path proc_root
-  if [ "${FM_TASK_PROCESS_BOOT_TIME+x}" = x ]; then
-    value=$FM_TASK_PROCESS_BOOT_TIME
-    fm_task_process_boot_time_valid "$value" || return 1
-    printf '%s\n' "$value"
-    return 0
-  fi
-  if [ "${FM_TASK_PROCESS_BOOT_TIME_FILE+x}" = x ]; then
-    value=$(fm_task_process_read_single_line_file "$FM_TASK_PROCESS_BOOT_TIME_FILE") || return 1
-    fm_task_process_boot_time_valid "$value" || return 1
-    printf '%s\n' "$value"
-    return 0
-  fi
-  proc_root=${FM_TASK_PROCESS_PROC_ROOT:-/proc}
-  path=$proc_root/stat
-  if [ -f "$path" ] && [ ! -L "$path" ]; then
-    fm_task_process_text_file_valid "$path" || return 1
-    value=$(awk '$1 == "btime" && $2 ~ /^[1-9][0-9]*$/ {print $2; exit}' "$path")
-    if [ -n "$value" ]; then
-      fm_task_process_boot_time_valid "$value" || return 1
-      printf '%s\n' "$value"
-      return 0
-    fi
-    [ "${FM_TASK_PROCESS_PROC_ROOT+x}" = x ] && return 1
-  elif [ "${FM_TASK_PROCESS_PROC_ROOT+x}" = x ]; then
-    return 1
-  fi
-  value=$(sysctl -n kern.boottime 2>/dev/null) || return 1
-  value=$(printf '%s\n' "$value" | awk -F'[=,]' '/sec/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
-  fm_task_process_boot_time_valid "$value" || return 1
-  printf '%s\n' "$value"
-}
-
-fm_task_process_file_change_time() {
-  local path=$1 follow=$2 value modified changed
-  if [ "$follow" = 1 ]; then
-    value=$(stat -L -f '%m %c' "$path" 2>/dev/null) \
-      || value=$(stat -L -c '%Y %Z' -- "$path" 2>/dev/null) \
-      || return 1
-  else
-    value=$(stat -f '%m %c' "$path" 2>/dev/null) \
-      || value=$(stat -c '%Y %Z' -- "$path" 2>/dev/null) \
-      || return 1
-  fi
-  read -r modified changed <<EOF
-$value
-EOF
-  fm_task_process_boot_time_valid "$modified" || return 1
-  fm_task_process_boot_time_valid "$changed" || return 1
-  if [ "$modified" -gt "$changed" ]; then
-    printf '%s\n' "$modified"
-  else
-    printf '%s\n' "$changed"
-  fi
-}
-
-fm_task_process_timezone_change_time() {
-  local path link_change target_change
-  if [ "${FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME+x}" = x ]; then
-    fm_task_process_boot_time_valid "$FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME" || return 1
-    printf '%s\n' "$FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME"
-    return 0
-  fi
-  [ "${TZ+x}" != x ] || return 1
-  path=/etc/localtime
-  [ -e "$path" ] || [ -L "$path" ] || return 1
-  link_change=$(fm_task_process_file_change_time "$path" 0) || return 1
-  target_change=$(fm_task_process_file_change_time "$path" 1) || return 1
-  if [ "$link_change" -gt "$target_change" ]; then
-    printf '%s\n' "$link_change"
-  else
-    printf '%s\n' "$target_change"
-  fi
-}
-
-fm_task_process_epoch_lstart() {
-  local epoch=$1 value
-  value=$(LC_ALL=C date -r "$epoch" +'%a_%b_%d_%T_%Y' 2>/dev/null) \
-    || value=$(LC_ALL=C date -d "@$epoch" +'%a_%b_%d_%T_%Y' 2>/dev/null) \
-    || return 1
-  printf 'lstart=%s\n' "$value"
-}
-
-fm_task_process_timezone_offset_seconds() {
-  local epoch=$1 value sign hours minutes offset
-  value=$(LC_ALL=C date -r "$epoch" +%z 2>/dev/null) \
-    || value=$(LC_ALL=C date -d "@$epoch" +%z 2>/dev/null) \
-    || return 1
-  case "$value" in
-    [+-][0-2][0-9][0-5][0-9]) ;;
-    *) return 1 ;;
-  esac
-  sign=${value:0:1}
-  hours=${value:1:2}
-  minutes=${value:3:2}
-  offset=$((10#$hours * 3600 + 10#$minutes * 60))
-  if [ "$sign" = - ]; then
-    offset=$((-offset))
-  fi
-  printf '%s\n' "$offset"
-}
-
-fm_task_process_lstart_epoch_unique() {
-  local identity=$1 epoch=$2 base_offset delta probe offset known candidate rendered matches=0
-  local -a offsets=()
-  base_offset=$(fm_task_process_timezone_offset_seconds "$epoch") || return 1
-  delta=-172800
-  while [ "$delta" -le 172800 ]; do
-    probe=$((epoch + delta))
-    offset=$(fm_task_process_timezone_offset_seconds "$probe") || return 1
-    for known in ${offsets[@]+"${offsets[@]}"}; do
-      [ "$known" != "$offset" ] || break
-    done
-    if [ "${known-}" != "$offset" ]; then
-      offsets+=("$offset")
-    fi
-    known=
-    delta=$((delta + 21600))
-  done
-  for offset in ${offsets[@]+"${offsets[@]}"}; do
-    candidate=$((epoch + base_offset - offset))
-    rendered=$(fm_task_process_epoch_lstart "$candidate") || return 1
-    if [ "$rendered" = "$identity" ]; then
-      matches=$((matches + 1))
-    fi
-  done
-  [ "$matches" -eq 1 ]
-}
-
-fm_task_process_lstart_epoch() {
-  local identity=$1 raw weekday month day time year padded extra epoch normalized
-  case "$identity" in
-    lstart=*) raw=${identity#lstart=} ;;
-    *) return 1 ;;
-  esac
-  raw=${raw//_/ }
-  extra=
-  IFS=' ' read -r weekday month day time year extra <<EOF
-$raw
-EOF
-  [ -z "${extra:-}" ] || return 1
-  case "$weekday" in Sun|Mon|Tue|Wed|Thu|Fri|Sat) ;; *) return 1 ;; esac
-  case "$month" in
-    Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ;;
-    *) return 1 ;;
-  esac
-  case "$day" in
-    [1-9]|0[1-9]|[12][0-9]|3[01]) ;;
-    *) return 1 ;;
-  esac
-  case "$time" in
-    [0-2][0-9]:[0-5][0-9]:[0-5][0-9]) ;;
-    *) return 1 ;;
-  esac
-  case "$year" in
-    [12][0-9][0-9][0-9]) ;;
-    *) return 1 ;;
-  esac
-  case "$day" in
-    [1-9]) padded=0$day ;;
-    *) padded=$day ;;
-  esac
-  epoch=$(LC_ALL=C date -j -f '%a %b %d %T %Y' \
-    "$weekday $month $padded $time $year" +%s 2>/dev/null) \
-    || epoch=$(LC_ALL=C date -d "$weekday $month $padded $time $year" +%s 2>/dev/null) \
-    || return 1
-  fm_task_process_boot_time_valid "$epoch" || return 1
-  normalized="lstart=${weekday}_${month}_${padded}_${time}_${year}"
-  [ "$(fm_task_process_epoch_lstart "$epoch")" = "$normalized" ] || return 1
-  fm_task_process_lstart_epoch_unique "$normalized" "$epoch" || return 1
-  printf '%s\n' "$epoch"
-}
-
-fm_task_process_legacy_prior_boot_proven() {
-  local current_boot current_boot_after boot_clock_before boot_clock_after boot_clock_epoch
-  local timezone_change_before timezone_change_after anchor_epoch agent_epoch
-  current_boot=$(fm_task_process_current_boot_time) || return 1
-  boot_clock_before=$(fm_task_process_current_boot_clock_identity) || return 1
-  boot_clock_epoch=$(fm_task_process_lstart_epoch "$boot_clock_before") || return 1
-  [ "$boot_clock_epoch" -ge "$current_boot" ] || return 1
-  [ "$boot_clock_epoch" -le $((current_boot + 1)) ] || return 1
-  timezone_change_before=$(fm_task_process_timezone_change_time) || return 1
-  [ "$timezone_change_before" -le "$current_boot" ] || return 1
-  case "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY" in
-    lstart=*) ;;
-    *) return 1 ;;
-  esac
-  anchor_epoch=$(fm_task_process_lstart_epoch "$FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY") || return 1
-  [ "$timezone_change_before" -le "$anchor_epoch" ] || return 1
-  [ "$anchor_epoch" -lt "$current_boot" ] || return 1
-  case "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY" in
-    lstart=*)
-      agent_epoch=$(fm_task_process_lstart_epoch "$FM_TASK_PROCESS_SCOPE_AGENT_IDENTITY") || return 1
-      [ "$timezone_change_before" -le "$agent_epoch" ] || return 1
-      [ "$agent_epoch" -lt "$current_boot" ] || return 1
-      ;;
-    *) return 1 ;;
-  esac
-  timezone_change_after=$(fm_task_process_timezone_change_time) || return 1
-  [ "$timezone_change_after" = "$timezone_change_before" ] || return 1
-  boot_clock_after=$(fm_task_process_current_boot_clock_identity) || return 1
-  [ "$boot_clock_after" = "$boot_clock_before" ] || return 1
-  current_boot_after=$(fm_task_process_current_boot_time) || return 1
-  [ "$current_boot_after" = "$current_boot" ] || return 1
-  return 0
-}
-
 fm_task_process_scope_prior_boot_proven() {
   local recorded_generation current_generation
   recorded_generation=${FM_TASK_PROCESS_SCOPE_BOOT_GENERATION-}
-  if [ -n "$recorded_generation" ]; then
-    fm_task_process_boot_generation_valid "$recorded_generation" || return 1
-    if current_generation=$(fm_task_process_current_boot_generation); then
-      [ "$current_generation" != "$recorded_generation" ] || return 1
-      return 0
-    fi
-  fi
-  fm_task_process_legacy_prior_boot_proven
+  [ -n "$recorded_generation" ] || return 1
+  fm_task_process_boot_generation_valid "$recorded_generation" || return 1
+  current_generation=$(fm_task_process_current_boot_generation) || return 1
+  [ "$current_generation" != "$recorded_generation" ]
 }
 
 fm_task_process_pgid() {

@@ -101,7 +101,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
-- A worker process scope whose recorded processes cannot be proved still live is refused rather than signaled, except a scope proved to predate the current host boot is retired to empty first so exit, relaunch, and cleanup can apply their ordinary guards.
+- A worker process scope whose recorded processes cannot be proved still live is refused rather than signaled, except a scope whose recorded boot generation differs from the current host generation is retired to empty first so exit, relaunch, and cleanup can apply their ordinary guards; older generation-less records remain refused.
   [`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns that contract.
 
 ## Capability matrix

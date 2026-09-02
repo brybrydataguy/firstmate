@@ -232,23 +232,10 @@ write_meta() {
     "mode=$mode"
 }
 
-SCOPE_BOOT_TIME=1700000000
 SCOPE_SLEEPER_PID=
 
 unset_boot_overlays() {
   unset FM_TASK_PROCESS_BOOT_GENERATION FM_TASK_PROCESS_BOOT_GENERATION_FILE
-  unset FM_TASK_PROCESS_BOOT_TIME FM_TASK_PROCESS_BOOT_TIME_FILE
-  unset FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
-}
-
-scope_lstart_at() {
-  local epoch=$1 out
-  if out=$(LC_ALL=C date -j -r "$epoch" +"%a_%b_%d_%T_%Y" 2>/dev/null); then
-    printf 'lstart=%s\n' "$out"
-    return 0
-  fi
-  out=$(LC_ALL=C date -d "@$epoch" +"%a_%b_%d_%T_%Y") || return 1
-  printf 'lstart=%s\n' "$out"
 }
 
 start_scope_sleeper() {
@@ -3055,7 +3042,6 @@ test_pre_reboot_merged_task_cleanup_proceeds() {
     || fail "could not read the reused process identity"
   write_prior_boot_scope "$case_dir" "$identity" boot-prior
   export FM_TASK_PROCESS_BOOT_GENERATION=boot-now
-  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -3085,7 +3071,6 @@ test_pre_reboot_unlanded_work_still_refuses() {
     || fail "could not read the reused process identity"
   write_prior_boot_scope "$case_dir" "$identity" boot-prior
   export FM_TASK_PROCESS_BOOT_GENERATION=boot-now
-  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
