@@ -1,0 +1,21 @@
+ok - fm-harness detects agy without granting primary session ownership
+ok - process-scope reader does not confer another task's token authority
+ok - inherited agy markers defer to markerless harness ancestry
+ok - fm-harness detects only agy's exact executable ancestry
+ok - fm-spawn: agy defaults to gemini-3.7-flash-high and uses --prompt-interactive
+lifecycle: reaping agy process scope for task-x1: 26411 
+ok - agy process-scope launcher owns detached task processes
+lifecycle: reaping agy process scope for task-x2: 32360 
+ok - agy process-scope launcher survives stock Bash and interrupted waits
+ok - fm-spawn: every verified worker source is scoped for agy transitions
+ok - fm-spawn: agy handles variant model suppression and effort capping appropriately
+ok - fm-spawn and fm-busy-lib: agy hooks preserve verified lifecycle boundaries
+ok - fm-spawn: agy plugin manifest supports dotted task IDs
+ok - fm-spawn: agy plugin installation refuses collisions and symlinks
+ok - fm-spawn: post-allocation agy failures preserve recovery metadata
+ok - fm-spawn: missing agy refuses before endpoint creation
+ok - fm-spawn: agy preserves portable worker launches without PID namespaces
+ok - fm-spawn: agy is restricted to crewmate and scout work
+ok - fm-spawn: agy-like raw workers remain unverified escape-hatch commands
+ok - fm-tmux-lib and tmux backend: agy busy signature and liveness detection verified
+ok - fm-bootstrap: validates agy harness and accepted efforts in crew-dispatch.json
