@@ -101,8 +101,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
-- Worker process scopes follow the ordinary identity-bound quiescence path unless trustworthy boot-generation evidence authorizes retirement without signaling; generation-less scopes cannot use reboot recovery.
-  [`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns the full contract, and [configuration](configuration.md#harness-support) owns which records support reboot recovery.
+- Worker process scopes follow the ordinary identity-bound quiescence path unless trustworthy prior-boot evidence authorizes retirement without signaling.
+  [`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns the full evidence and refusal contract, and [configuration](configuration.md#harness-support) owns which records support reboot recovery.
 
 ## Capability matrix
 

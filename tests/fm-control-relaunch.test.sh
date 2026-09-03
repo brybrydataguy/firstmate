@@ -288,20 +288,36 @@ unset_boot_overlays() {
   unset FM_TASK_PROCESS_BOOT_GENERATION FM_TASK_PROCESS_BOOT_GENERATION_FILE
   unset FM_TASK_PROCESS_BOOT_TIME FM_TASK_PROCESS_BOOT_TIME_FILE
   unset FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
-  unset FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME
 }
 
 set_boot_overlays() {
   export FM_TASK_PROCESS_BOOT_GENERATION=${1:-boot-now}
 }
 
+set_legacy_boot_overlays() {
+  local record=$1 gap=${2:-3600} change_time boot_time
+  change_time=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the legacy scope change time"
+  boot_time=$((change_time + gap))
+  set_legacy_boot_time "$boot_time"
+}
+
+set_legacy_boot_time() {
+  local boot_time=$1
+  export FM_TASK_PROCESS_BOOT_GENERATION=boot-now
+  export FM_TASK_PROCESS_BOOT_TIME=$boot_time
+  export FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
+  FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY=$(scope_lstart_at $((boot_time + 1))) \
+    || fail "could not render the legacy scope boot clock"
+}
+
 scope_lstart_at() {
   local epoch=$1 out
-  if out=$(LC_ALL=C date -j -r "$epoch" +"%a_%b_%d_%T_%Y" 2>/dev/null); then
-    printf 'lstart=%s\n' "$out"
-    return 0
-  fi
-  out=$(LC_ALL=C date -d "@$epoch" +"%a_%b_%d_%T_%Y") || return 1
+  out=$(LC_ALL=C date -r "$epoch" +'%a %b %e %T %Y' 2>/dev/null) \
+    || out=$(LC_ALL=C date -d "@$epoch" +'%a %b %e %T %Y' 2>/dev/null) \
+    || return 1
+  out=$(printf '%s\n' "$out" | awk '{$1=$1; print}')
+  out=${out// /_}
   printf 'lstart=%s\n' "$out"
 }
 
@@ -329,9 +345,9 @@ assert_scope_sleeper_alive() {
     || fail "reused process $SCOPE_SLEEPER_PID was signaled"
 }
 
-write_active_reused_scope() {
-  local dir=$1 id=$2 identity=$3 boot_gen=${4-}
-  local pid=$SCOPE_SLEEPER_PID token=test-$id
+write_active_scope_for_pid() {
+  local dir=$1 id=$2 pid=$3 identity=$4 boot_gen=${5-} token
+  token=${6:-test-$id}
   {
     printf 'version=2\n'
     printf 'status=active\n'
@@ -348,6 +364,36 @@ write_active_reused_scope() {
   } > "$dir/home/state/$id.process-scope"
 }
 
+write_active_reused_scope() {
+  write_active_scope_for_pid "$1" "$2" "$SCOPE_SLEEPER_PID" "$3" "${4-}"
+}
+
+write_generationless_scope_near_change_time() {
+  local dir=$1 id=$2 pid=$3 epoch identity meta token
+  epoch=$(date +%s) || fail "could not read the current clock for a legacy scope"
+  identity=$(scope_lstart_at "$epoch") \
+    || fail "could not render the legacy scope anchor identity"
+  token="s$epoch.999.1"
+  meta="$dir/home/state/$id.meta"
+  if ! awk -F= -v token="$token" '
+    $1 == "spawn_gen" {print "spawn_gen=" token; next}
+    $1 == "process_scope_token" {print "process_scope_token=" token; next}
+    {print}
+  ' "$meta" > "$meta.tmp" || ! mv "$meta.tmp" "$meta"; then
+    fail "could not publish the legacy scope metadata"
+  fi
+  write_active_scope_for_pid "$dir" "$id" "$pid" "$identity" '' "$token"
+  LEGACY_SCOPE_TOKEN=$token
+}
+
+absent_scope_pid() {
+  local pid=999999
+  while ps -p "$pid" -o pid= >/dev/null 2>&1; do
+    pid=$((pid + 1))
+  done
+  printf '%s\n' "$pid"
+}
+
 prepare_dead_relaunch() {
   local dir=$1 id=$2
   printf 'zsh' > "$dir/fake/command"
@@ -356,9 +402,10 @@ prepare_dead_relaunch() {
 }
 
 assert_scope_empty() {
-  local path=$1 id=$2
+  local path=$1 id=$2 token
+  token=${3:-test-$id}
   grep -qx 'status=empty' "$path" || fail "process scope was not retired to empty"
-  grep -qx "token=test-$id" "$path" || fail "empty process scope lost its token"
+  grep -qx "token=$token" "$path" || fail "empty process scope lost its token"
   grep -qx 'endpoint_pid=3' "$path" || fail "empty process scope lost its endpoint binding"
   grep -q '^anchor_pid=' "$path" && fail "empty process scope retained an active anchor"
 }
@@ -1177,7 +1224,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 1000 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -1608,29 +1655,139 @@ test_current_boot_identity_mismatch_still_refuses() {
   pass "fm-spawn --relaunch: current-boot identity mismatch still refuses without mutation"
 }
 
-test_generationless_lstart_scope_refuses_without_mutation() {
-  local dir out rc before identity
-  dir=$(new_case generationless-lstart rl53)
+test_generationless_pre_boot_lstart_with_absent_anchor_relaunches() {
+  local dir out rc pid record
+  dir=$(new_case generationless-pre-boot rl53)
   add_ship_task "$dir" rl53 claude
   prepare_dead_relaunch "$dir" rl53
-  start_scope_sleeper
-  identity=$(TZ=UTC scope_lstart_at $((SCOPE_BOOT_TIME - 3600)))
-  write_active_reused_scope "$dir" rl53 "$identity"
-  before=$(cat "$dir/home/state/rl53.process-scope")
-  set_boot_overlays boot-now
-  export FM_TASK_PROCESS_BOOT_TIME=$SCOPE_BOOT_TIME
-  export FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
-  FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY=$(TZ=Etc/GMT-2 scope_lstart_at $((SCOPE_BOOT_TIME + 1)))
-  export FM_TASK_PROCESS_TIMEZONE_CHANGE_TIME=1000000000
-  out=$(TZ=Etc/GMT-2 run_spawn "$dir" rl53 --relaunch --harness claude); rc=$?
+  pid=$(absent_scope_pid)
+  write_generationless_scope_near_change_time "$dir" rl53 "$pid"
+  record="$dir/home/state/rl53.process-scope"
+  set_legacy_boot_overlays "$record" 3600
+  out=$(run_spawn "$dir" rl53 --relaunch --harness claude); rc=$?
   unset_boot_overlays
-  expect_code 1 "$rc" "a generation-less lstart scope must refuse"
+  expect_code 0 "$rc" "a corroborated generation-less pre-boot scope should recover"$'\n'"$out"
+  assert_scope_empty "$record" rl53 "$LEGACY_SCOPE_TOKEN"
+  pass "fm-spawn --relaunch: a corroborated generation-less pre-boot scope retires without signaling"
+}
+
+test_generationless_scope_with_present_reused_anchor_refuses() {
+  local dir out rc before record
+  dir=$(new_case generationless-present-anchor rl85)
+  add_ship_task "$dir" rl85 claude
+  prepare_dead_relaunch "$dir" rl85
+  start_scope_sleeper
+  /bin/sleep 2
+  write_generationless_scope_near_change_time "$dir" rl85 "$SCOPE_SLEEPER_PID"
+  record="$dir/home/state/rl85.process-scope"
+  before=$(cat "$record")
+  set_legacy_boot_overlays "$record" 3600
+  out=$(run_spawn "$dir" rl85 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a generation-less scope whose anchor PID is present must refuse"
   assert_contains "$out" "process-scope anchor is gone or changed" \
-    "generation-less lstart should keep the unowned-group refusal"
+    "a present reused anchor should keep the unowned-group refusal"
   assert_scope_sleeper_alive
-  [ "$(cat "$dir/home/state/rl53.process-scope")" = "$before" ] \
-    || fail "generation-less lstart refusal mutated the process-scope record"
-  pass "fm-spawn --relaunch: generation-less lstart scopes remain untouched"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "present-anchor refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: a generation-less scope with a present reused anchor refuses"
+}
+
+test_generationless_scope_with_ambiguous_boot_order_refuses() {
+  local dir out rc before pid record
+  dir=$(new_case generationless-ambiguous rl86)
+  add_ship_task "$dir" rl86 claude
+  prepare_dead_relaunch "$dir" rl86
+  pid=$(absent_scope_pid)
+  write_generationless_scope_near_change_time "$dir" rl86 "$pid"
+  record="$dir/home/state/rl86.process-scope"
+  before=$(cat "$record")
+  set_legacy_boot_overlays "$record" 5
+  out=$(run_spawn "$dir" rl86 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a generation-less scope too close to boot must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "ambiguous boot ordering should keep the unowned-group refusal"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "ambiguous boot-order refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: ambiguous legacy boot ordering refuses without mutation"
+}
+
+test_generationless_scope_after_boot_refuses() {
+  local dir out rc before pid record
+  dir=$(new_case generationless-after-boot rl87)
+  add_ship_task "$dir" rl87 claude
+  prepare_dead_relaunch "$dir" rl87
+  pid=$(absent_scope_pid)
+  write_generationless_scope_near_change_time "$dir" rl87 "$pid"
+  record="$dir/home/state/rl87.process-scope"
+  before=$(cat "$record")
+  set_legacy_boot_overlays "$record" -60
+  out=$(run_spawn "$dir" rl87 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a generation-less scope published after boot must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "post-boot legacy evidence should keep the unowned-group refusal"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "post-boot legacy refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: a post-boot generation-less scope refuses without mutation"
+}
+
+test_generationless_scope_copied_after_boot_refuses() {
+  local dir out rc before pid record original_change boot_time copied_change
+  dir=$(new_case generationless-copied-after-boot rl89)
+  add_ship_task "$dir" rl89 claude
+  prepare_dead_relaunch "$dir" rl89
+  pid=$(absent_scope_pid)
+  write_generationless_scope_near_change_time "$dir" rl89 "$pid"
+  record="$dir/home/state/rl89.process-scope"
+  original_change=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the original legacy scope change time"
+  boot_time=$((original_change + 1))
+  while [ "$(date +%s)" -le "$boot_time" ]; do
+    /bin/sleep 0.05
+  done
+  cp -p "$record" "$record.copied"
+  mv "$record.copied" "$record"
+  copied_change=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the copied legacy scope change time"
+  [ "$copied_change" -gt "$boot_time" ] \
+    || fail "copied legacy scope fixture did not receive a post-boot ctime"
+  before=$(cat "$record")
+  set_legacy_boot_time "$boot_time"
+  out=$(run_spawn "$dir" rl89 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a generation-less scope copied after boot must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "a copied record should keep the unowned-group refusal"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "copied legacy scope refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: an ordinary post-boot copy cannot forge legacy reboot evidence"
+}
+
+test_generationless_lstart_with_uncorrelated_clock_refuses() {
+  local dir out rc before identity pid record now
+  dir=$(new_case generationless-lstart rl88)
+  add_ship_task "$dir" rl88 claude
+  prepare_dead_relaunch "$dir" rl88
+  pid=$(absent_scope_pid)
+  write_generationless_scope_near_change_time "$dir" rl88 "$pid"
+  record="$dir/home/state/rl88.process-scope"
+  now=$(date +%s) || fail "could not read the clock for an uncorrelated legacy identity"
+  identity=$(scope_lstart_at $((now - 3600))) \
+    || fail "could not render the uncorrelated legacy identity"
+  sed "s/^anchor_identity=.*/anchor_identity=$identity/" "$record" > "$record.tmp"
+  mv "$record.tmp" "$record"
+  before=$(cat "$record")
+  set_legacy_boot_overlays "$record" 3600
+  out=$(run_spawn "$dir" rl88 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "an uncorroborated generation-less lstart scope must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "uncorroborated lstart should keep the unowned-group refusal"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "uncorroborated lstart refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: uncorroborated generation-less lstart scopes remain untouched"
 }
 
 test_portable_boot_generation_mismatch_relaunches() {
@@ -2139,7 +2296,12 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_pre_reboot_relaunch_does_not_signal_a_reused_pid
 test_pre_reboot_spawn_relaunch_does_not_signal_a_reused_pid
 test_current_boot_identity_mismatch_still_refuses
-test_generationless_lstart_scope_refuses_without_mutation
+test_generationless_pre_boot_lstart_with_absent_anchor_relaunches
+test_generationless_scope_with_present_reused_anchor_refuses
+test_generationless_scope_with_ambiguous_boot_order_refuses
+test_generationless_scope_after_boot_refuses
+test_generationless_scope_copied_after_boot_refuses
+test_generationless_lstart_with_uncorrelated_clock_refuses
 test_portable_boot_generation_mismatch_relaunches
 test_matching_boot_generation_refuses_even_with_pre_boot_lstart
 test_missing_boot_generation_refuses

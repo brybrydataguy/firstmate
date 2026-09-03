@@ -236,6 +236,18 @@ SCOPE_SLEEPER_PID=
 
 unset_boot_overlays() {
   unset FM_TASK_PROCESS_BOOT_GENERATION FM_TASK_PROCESS_BOOT_GENERATION_FILE
+  unset FM_TASK_PROCESS_BOOT_TIME FM_TASK_PROCESS_BOOT_TIME_FILE
+  unset FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
+}
+
+scope_lstart_at() {
+  local epoch=$1 out
+  out=$(LC_ALL=C date -r "$epoch" +'%a %b %e %T %Y' 2>/dev/null) \
+    || out=$(LC_ALL=C date -d "@$epoch" +'%a %b %e %T %Y' 2>/dev/null) \
+    || return 1
+  out=$(printf '%s\n' "$out" | awk '{$1=$1; print}')
+  out=${out// /_}
+  printf 'lstart=%s\n' "$out"
 }
 
 start_scope_sleeper() {
@@ -281,6 +293,40 @@ write_prior_boot_scope() {
     printf 'pgid=%s\n' "$pid"
     [ -z "$boot_gen" ] || printf 'boot_generation=%s\n' "$boot_gen"
   } > "$case_dir/state/task-x1.process-scope"
+}
+
+write_generationless_dead_scope() {
+  local case_dir=$1 epoch token identity record change_time boot_time pid=999999
+  while ps -p "$pid" -o pid= >/dev/null 2>&1; do
+    pid=$((pid + 1))
+  done
+  epoch=$(date +%s) || fail "could not read the current clock for a legacy scope"
+  token="s$epoch.999.1"
+  identity=$(scope_lstart_at "$epoch") \
+    || fail "could not render the legacy scope anchor identity"
+  printf 'process_scope_token=%s\n' "$token" >> "$case_dir/state/task-x1.meta"
+  record="$case_dir/state/task-x1.process-scope"
+  {
+    printf 'version=2\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=process-group\n'
+    printf 'anchor_pid=%s\n' "$pid"
+    printf 'anchor_identity=%s\n' "$identity"
+    printf 'agent_pid=%s\n' "$pid"
+    printf 'agent_identity=%s\n' "$identity"
+    printf 'endpoint_pid=3\n'
+    printf 'endpoint_identity=%s\n' "$identity"
+    printf 'pgid=%s\n' "$pid"
+  } > "$record"
+  change_time=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the legacy scope change time"
+  boot_time=$((change_time + 3600))
+  export FM_TASK_PROCESS_BOOT_GENERATION=boot-now
+  export FM_TASK_PROCESS_BOOT_TIME=$boot_time
+  export FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY
+  FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY=$(scope_lstart_at $((boot_time + 1))) \
+    || fail "could not render the legacy scope boot clock"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -1635,7 +1681,6 @@ test_agy_teardown_recovers_stale_lock_before_quiescence() {
   mkdir -p "$(dirname "$lock")"
   : > "$lock"
   touch -t 200001010000 "$lock"
-
   rc=0
   FM_EXPECT_SCOPE_PID="$pid" FM_EXPECT_ENDPOINT_PID="$endpoint_pid" \
   FM_EXPECT_SCOPE_WT="$case_dir/wt" \
@@ -1647,7 +1692,7 @@ test_agy_teardown_recovers_stale_lock_before_quiescence() {
     kill -KILL "$pid" "$endpoint_pid" 2>/dev/null || true
   fi
   wait "$endpoint_pid" 2>/dev/null || true
-  expect_code 0 "$rc" "agy-stale-lock-preflight: teardown should recover"
+  expect_code 0 "$rc" "agy-stale-lock-preflight: teardown should recover"$'\n'"$(cat "$case_dir/stderr")"
   assert_present "$case_dir/scope-holder.log" \
     "agy-stale-lock-preflight: regression did not exercise a live scope holder"
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
@@ -3061,6 +3106,27 @@ test_pre_reboot_merged_task_cleanup_proceeds() {
   pass "teardown: a proved prior-boot scope lets merged-task cleanup proceed without signaling"
 }
 
+test_generationless_pre_reboot_merged_task_cleanup_proceeds() {
+  local case_dir rc wt_head
+  case_dir=$(make_case generationless-reboot-merged)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  write_generationless_dead_scope "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset_boot_overlays
+
+  expect_code 0 "$rc" "generation-less prior-boot cleanup should proceed through ordinary landed-work guards"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "generation-less prior-boot cleanup did not complete ordinary teardown"
+  pass "teardown: a corroborated generation-less prior-boot scope permits landed cleanup"
+}
+
 test_pre_reboot_unlanded_work_still_refuses() {
   local case_dir rc identity
   case_dir=$(make_case reboot-unlanded)
@@ -3428,6 +3494,7 @@ test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_pre_reboot_merged_task_cleanup_proceeds
+test_generationless_pre_reboot_merged_task_cleanup_proceeds
 test_pre_reboot_unlanded_work_still_refuses
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
