@@ -23,13 +23,18 @@
 # generation, proving that none of its processes can still exist. A version 2
 # generation-less Darwin scope can use the same retirement only when its anchor
 # PID is absent and the active record's inode change time proves the record was
-# published before the current boot. Its spawn-token epoch must not postdate
-# the recorded anchor start or inode change time, the recorded anchor `lstart=`
-# must agree within five seconds with that change time, the current boot's PID 1
-# `lstart=` must agree within one second with the authoritative boot time, and
-# the boot must be more than five seconds after the record. Those paired epoch
-# and civil-clock checks avoid reconstructing capture-time timezone or wall-clock
-# history from `lstart=` alone. Matching or
+# published before the current boot. Inode ctime is the ordering evidence, not
+# preservable mtime or optional birth time: ordinary writes, metadata changes,
+# copies, and restores advance ctime, so post-boot activity cannot preserve a
+# pre-boot proof. Its spawn-token epoch must not postdate the recorded anchor
+# start or inode change time, the recorded anchor `lstart=` must agree within
+# five seconds with that change time, the current boot's PID 1 `lstart=` must
+# agree within one second with the authoritative boot time, and the boot must be
+# more than five seconds after the record. Those paired epoch and civil-clock
+# checks avoid reconstructing capture-time timezone or wall-clock history from
+# `lstart=` alone. Before retirement, the ctime, boot time, boot-clock identity,
+# and absent anchor are checked again and must stay unchanged; unavailable,
+# malformed, or changing evidence fails closed. Matching or
 # unreadable boot-generation evidence, a present legacy anchor PID, an
 # uncorroborated or ambiguous timestamp, a missing PID by itself, an agent-free
 # endpoint, elapsed time, branch cleanliness, and process-name guesses never
@@ -298,9 +303,7 @@ fm_task_process_epoch_lstart() {
 fm_task_process_file_change_time() {
   local path=$1 value
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  # Use inode change time, not preservable mtime or optional birth time.
-  # Ordinary writes, metadata changes, copies, and restores advance ctime;
-  # unavailable or malformed ctime therefore fails closed below.
+  # Read the inode ctime used by the header's legacy prior-boot proof.
   value=$(stat -c '%Z' -- "$path" 2>/dev/null) \
     || value=$(stat -f '%c' "$path" 2>/dev/null) \
     || return 1

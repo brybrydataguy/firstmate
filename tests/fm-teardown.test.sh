@@ -1818,7 +1818,7 @@ PY
     process_stat=$("$REAL_PS_FOR_TEST" -o stat= -p "$foreign_pid" 2>/dev/null || true)
     case "$process_stat" in ''|*Z*) ;; *) foreign_alive=1 ;; esac
   fi
-  kill -KILL "$pid" "$endpoint_pid" "$foreign_pid" 2>/dev/null || true
+  kill -KILL -- "-$pid" "$endpoint_pid" "$foreign_pid" 2>/dev/null || true
   wait "$endpoint_pid" 2>/dev/null || true
   wait "$foreign_pid" 2>/dev/null || true
   expect_code 1 "$rc" "agy-foreign-holder-preflight: teardown should refuse"

@@ -1756,6 +1756,49 @@ test_generationless_scope_after_boot_refuses() {
   pass "fm-spawn --relaunch: a post-boot generation-less scope refuses without mutation"
 }
 
+test_generationless_scope_at_boot_refuses() {
+  local dir out rc before pid record change_time
+  dir=$(new_case generationless-at-boot rl91)
+  add_ship_task "$dir" rl91 claude
+  prepare_dead_relaunch "$dir" rl91
+  pid=$(absent_scope_pid)
+  write_generationless_scope_near_change_time "$dir" rl91 "$pid"
+  record="$dir/home/state/rl91.process-scope"
+  change_time=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the equal-to-boot legacy scope change time"
+  before=$(cat "$record")
+  set_legacy_boot_time "$change_time"
+  out=$(run_spawn "$dir" rl91 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a generation-less scope published exactly at boot must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "equal-to-boot legacy evidence should keep the unowned-group refusal"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "equal-to-boot legacy refusal mutated the process-scope record"
+  pass "fm-spawn --relaunch: legacy evidence equal to boot refuses without mutation"
+}
+
+test_generationless_scope_with_unavailable_timing_refuses() {
+  local dir out rc before pid record
+  dir=$(new_case generationless-unavailable-time rl92)
+  add_ship_task "$dir" rl92 claude
+  prepare_dead_relaunch "$dir" rl92
+  pid=$(absent_scope_pid)
+  write_generationless_scope_near_change_time "$dir" rl92 "$pid"
+  record="$dir/home/state/rl92.process-scope"
+  before=$(cat "$record")
+  set_boot_overlays boot-now
+  export FM_TASK_PROCESS_BOOT_TIME_FILE="$dir/missing-boot-time"
+  out=$(run_spawn "$dir" rl92 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 1 "$rc" "a generation-less scope with unavailable boot timing must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "unavailable legacy timing should keep the unowned-group refusal"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "unavailable legacy timing mutated the process-scope record"
+  pass "fm-spawn --relaunch: unavailable legacy timing refuses without mutation"
+}
+
 test_generationless_scope_copied_after_boot_refuses() {
   local dir out rc before pid record original_change boot_time copied_change
   dir=$(new_case generationless-copied-after-boot rl89)
@@ -1786,6 +1829,150 @@ test_generationless_scope_copied_after_boot_refuses() {
   [ "$(cat "$record")" = "$before" ] \
     || fail "copied legacy scope refusal mutated the process-scope record"
   pass "fm-spawn --relaunch: an ordinary post-boot copy cannot forge legacy reboot evidence"
+}
+
+test_generationless_scope_changed_after_boot_refuses() {
+  local entry mode id dir pid record change_time changed_time before out rc index=0
+  local boot_time=0
+  local -a case_dirs=()
+  pid=$(absent_scope_pid)
+  for entry in write:rl93 metadata:rl94 restore:rl95; do
+    mode=${entry%%:*}
+    id=${entry#*:}
+    dir=$(new_case "generationless-$mode-after-boot" "$id")
+    add_ship_task "$dir" "$id" claude
+    prepare_dead_relaunch "$dir" "$id"
+    write_generationless_scope_near_change_time "$dir" "$id" "$pid"
+    record="$dir/home/state/$id.process-scope"
+    change_time=$(fm_task_process_file_change_time "$record") \
+      || fail "could not read the original $mode legacy scope change time"
+    [ "$change_time" -le "$boot_time" ] || boot_time=$change_time
+    [ "$mode" != restore ] || cp -p "$record" "$record.backup"
+    case_dirs+=("$dir")
+  done
+  boot_time=$((boot_time + 1))
+  while [ "$(date +%s)" -le "$boot_time" ]; do
+    /bin/sleep 0.05
+  done
+  for entry in write:rl93 metadata:rl94 restore:rl95; do
+    mode=${entry%%:*}
+    id=${entry#*:}
+    dir=${case_dirs[$index]}
+    index=$((index + 1))
+    record="$dir/home/state/$id.process-scope"
+    case "$mode" in
+      write) printf '\n' >> "$record" ;;
+      metadata) touch -t 200001010000 "$record" ;;
+      restore) cp -p "$record.backup" "$record" ;;
+    esac
+    changed_time=$(fm_task_process_file_change_time "$record") \
+      || fail "could not read the post-boot $mode legacy scope change time"
+    [ "$changed_time" -gt "$boot_time" ] \
+      || fail "post-boot $mode did not advance legacy scope ctime"
+    before=$(cat "$record")
+    set_legacy_boot_time "$boot_time"
+    out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+    unset_boot_overlays
+    expect_code 1 "$rc" "a generation-less scope changed by post-boot $mode must refuse"
+    assert_contains "$out" "process-scope anchor is gone or changed" \
+      "post-boot $mode should keep the unowned-group refusal"
+    [ "$(cat "$record")" = "$before" ] \
+      || fail "post-boot $mode refusal mutated the process-scope record"
+  done
+  pass "fm-spawn --relaunch: post-boot writes, metadata changes, and restores cannot forge legacy reboot evidence"
+}
+
+test_generationless_scope_with_changing_evidence_refuses() {
+  local dir out rc before pid record change_time boot_time boot_file boot_identity
+
+  dir=$(new_case generationless-changing-boot rl96)
+  add_ship_task "$dir" rl96 claude
+  prepare_dead_relaunch "$dir" rl96
+  pid=$(absent_scope_pid)
+  write_generationless_scope_near_change_time "$dir" rl96 "$pid"
+  record="$dir/home/state/rl96.process-scope"
+  change_time=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the changing-boot legacy scope change time"
+  boot_time=$((change_time + 3600))
+  boot_file="$dir/boot-time"
+  printf '%s\n' "$boot_time" > "$boot_file"
+  boot_identity=$(scope_lstart_at $((boot_time + 1))) \
+    || fail "could not render the changing boot identity"
+  cat > "$dir/fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "$FM_FAKE_BOOT_TIME_FILE" ]; then
+  value=$("$FM_REAL_CAT" "$1") || exit 1
+  if [ ! -e "$FM_FAKE_BOOT_TIME_CHANGED" ]; then
+    printf '%s\n' "$FM_FAKE_BOOT_TIME_NEXT" > "$1"
+    : > "$FM_FAKE_BOOT_TIME_CHANGED"
+  fi
+  printf '%s\n' "$value"
+  exit 0
+fi
+exec "$FM_REAL_CAT" "$@"
+SH
+  chmod +x "$dir/fakebin/cat"
+  before=$(cat "$record")
+  export FM_TASK_PROCESS_BOOT_GENERATION=boot-now
+  export FM_TASK_PROCESS_BOOT_TIME_FILE="$boot_file"
+  export FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY="$boot_identity"
+  export FM_REAL_CAT
+  FM_REAL_CAT=$(command -v cat)
+  export FM_FAKE_BOOT_TIME_FILE="$boot_file"
+  export FM_FAKE_BOOT_TIME_NEXT=$((boot_time + 10))
+  export FM_FAKE_BOOT_TIME_CHANGED="$dir/boot-time.changed"
+  out=$(run_spawn "$dir" rl96 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  unset FM_REAL_CAT FM_FAKE_BOOT_TIME_FILE FM_FAKE_BOOT_TIME_NEXT FM_FAKE_BOOT_TIME_CHANGED
+  expect_code 1 "$rc" "a generation-less scope whose boot evidence changes must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "changing boot evidence should keep the unowned-group refusal"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "changing boot evidence mutated the process-scope record"
+
+  dir=$(new_case generationless-changing-ctime rl97)
+  add_ship_task "$dir" rl97 claude
+  prepare_dead_relaunch "$dir" rl97
+  write_generationless_scope_near_change_time "$dir" rl97 "$pid"
+  record="$dir/home/state/rl97.process-scope"
+  change_time=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the changing-ctime legacy scope change time"
+  cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+set -u
+last=
+count=0
+for value in "$@"; do
+  last=$value
+done
+if [ "$last" = "$FM_FAKE_CTIME_PATH" ]; then
+  [ ! -e "$FM_FAKE_CTIME_COUNT" ] \
+    || count=$(cat "$FM_FAKE_CTIME_COUNT")
+  printf '%s\n' $((count + 1)) > "$FM_FAKE_CTIME_COUNT"
+  printf '%s\n' $((FM_FAKE_CTIME_FIRST + count))
+  exit 0
+fi
+exec "$FM_REAL_STAT" "$@"
+SH
+  chmod +x "$dir/fakebin/stat"
+  before=$(cat "$record")
+  set_legacy_boot_time $((change_time + 3600))
+  export FM_REAL_STAT
+  FM_REAL_STAT=$(command -v stat)
+  export FM_FAKE_CTIME_PATH
+  FM_FAKE_CTIME_PATH=$(CDPATH='' cd -- "${record%/*}" && pwd -P)/${record##*/}
+  export FM_FAKE_CTIME_FIRST="$change_time"
+  export FM_FAKE_CTIME_COUNT="$dir/ctime.count"
+  out=$(run_spawn "$dir" rl97 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  unset FM_REAL_STAT FM_FAKE_CTIME_PATH FM_FAKE_CTIME_FIRST FM_FAKE_CTIME_COUNT
+  expect_code 1 "$rc" "a generation-less scope whose ctime evidence changes must refuse"
+  assert_contains "$out" "process-scope anchor is gone or changed" \
+    "changing ctime evidence should keep the unowned-group refusal"
+  [ "$(cat "$record")" = "$before" ] \
+    || fail "changing ctime evidence mutated the process-scope record"
+  pass "fm-spawn --relaunch: changing boot or ctime evidence refuses without mutation"
 }
 
 test_generationless_lstart_with_uncorrelated_clock_refuses() {
@@ -2324,7 +2511,11 @@ test_generationless_scope_with_delayed_publication_relaunches
 test_generationless_scope_with_present_reused_anchor_refuses
 test_generationless_scope_with_ambiguous_boot_order_refuses
 test_generationless_scope_after_boot_refuses
+test_generationless_scope_at_boot_refuses
+test_generationless_scope_with_unavailable_timing_refuses
 test_generationless_scope_copied_after_boot_refuses
+test_generationless_scope_changed_after_boot_refuses
+test_generationless_scope_with_changing_evidence_refuses
 test_generationless_lstart_with_uncorrelated_clock_refuses
 test_portable_boot_generation_mismatch_relaunches
 test_matching_boot_generation_refuses_even_with_pre_boot_lstart
