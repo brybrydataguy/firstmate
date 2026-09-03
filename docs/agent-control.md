@@ -30,7 +30,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
-| `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
+| `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running, or retire a stopped agent's scope when prior-boot evidence proves no recorded process survives. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. A proved prior-boot scope becomes empty without delivering a key and reports `already-stopped`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone, and a recorded durable worker process scope is empty. Already-stopped with no live scoped processes is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
 
@@ -101,8 +101,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
-- Worker process scopes follow the ordinary identity-bound quiescence path unless trustworthy boot-generation evidence authorizes retirement without signaling; generation-less scopes cannot use reboot recovery.
-  [`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns the full contract, and [configuration](configuration.md#harness-support) owns which records support reboot recovery.
+- Worker process scopes follow the ordinary identity-bound quiescence path unless trustworthy prior-boot evidence authorizes retirement without signaling.
+  [`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns the full evidence and refusal contract, and [configuration](configuration.md#harness-support) owns which records support reboot recovery.
 
 ## Capability matrix
 

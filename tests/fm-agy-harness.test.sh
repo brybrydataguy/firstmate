@@ -133,6 +133,28 @@ SH
   pass "fm-harness detects agy without granting primary session ownership"
 }
 
+test_process_scope_reader_does_not_export_token() {
+  local case_dir state token
+  case_dir="$TMP_ROOT/process-scope-reader-export"
+  state="$case_dir/state"
+  token=scope-reader-x1
+  mkdir -p "$state"
+  fm_task_process_scope_create_empty "$state" task-x1 "$token" process-group \
+    || fail "process-scope reader fixture could not create an empty scope"
+
+  export FM_TASK_PROCESS_SCOPE_TOKEN=ambient-worker-token
+  fm_task_process_scope_record_read "$state" task-x1 "$token" \
+    || fail "process-scope reader could not read its fixture"
+  [ "$FM_TASK_PROCESS_SCOPE_TOKEN" = "$token" ] \
+    || fail "process-scope reader did not publish the record token"
+  if env | grep -q '^FM_TASK_PROCESS_SCOPE_TOKEN='; then
+    unset FM_TASK_PROCESS_SCOPE_TOKEN
+    fail "process-scope reader exported another task's token to child processes"
+  fi
+  unset FM_TASK_PROCESS_SCOPE_TOKEN
+  pass "process-scope reader does not confer another task's token authority"
+}
+
 test_agy_markers_defer_to_markerless_harness_ancestry() {
   local dir bin expected out
   dir="$TMP_ROOT/inherited-marker-detection"
@@ -776,6 +798,7 @@ test_agy_crew_dispatch_validation() {
 }
 
 test_agy_harness_detection
+test_process_scope_reader_does_not_export_token
 test_agy_markers_defer_to_markerless_harness_ancestry
 test_agy_ancestry_detection_is_anchored
 test_agy_default_model_and_launch_template

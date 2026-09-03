@@ -36,6 +36,7 @@ scope_agent() {
     if fm_task_process_scope_record_read "$state" "$id" "$token" 2>/dev/null \
        && [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] \
        && [ "$FM_TASK_PROCESS_SCOPE_AGENT_PID" = "$agent_pid" ]; then
+      export FM_TASK_PROCESS_SCOPE_TOKEN=$token
       if [ "$containment" = pid-namespace ]; then
         exec "$enclosure" --user --map-current-user --pid --fork \
           --kill-child=SIGKILL --mount-proc -- /bin/sh -c "$launch"
