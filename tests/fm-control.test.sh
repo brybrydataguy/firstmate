@@ -797,6 +797,64 @@ test_interrupt_refuses_when_no_agent_runs() {
   pass "fm-control interrupt: refuses when no agent is running rather than keying a shell"
 }
 
+test_interrupt_retires_proved_prior_boot_scope_when_agent_stopped() {
+  local dir out rc pid=999999 epoch token identity record change_time boot_time boot_identity
+  dir=$(new_case prior-boot-interrupt)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  while ps -p "$pid" -o pid= >/dev/null 2>&1; do
+    pid=$((pid + 1))
+  done
+  epoch=$(date +%s) || fail "could not read the legacy scope clock"
+  token="s$epoch.999.1"
+  identity=$(fm_task_process_epoch_lstart "$epoch") \
+    || fail "could not render the legacy anchor identity"
+  awk -F= -v token="$token" '
+    $1 == "spawn_gen" {print "spawn_gen=" token; next}
+    $1 == "process_scope_token" {print "process_scope_token=" token; next}
+    {print}
+  ' "$dir/home/state/t1.meta" > "$dir/home/state/t1.meta.tmp" \
+    || fail "could not prepare legacy scope metadata"
+  mv "$dir/home/state/t1.meta.tmp" "$dir/home/state/t1.meta" \
+    || fail "could not publish legacy scope metadata"
+  record="$dir/home/state/t1.process-scope"
+  {
+    printf 'version=2\n'
+    printf 'status=active\n'
+    printf 'token=%s\n' "$token"
+    printf 'containment=process-group\n'
+    printf 'anchor_pid=%s\n' "$pid"
+    printf 'anchor_identity=%s\n' "$identity"
+    printf 'agent_pid=%s\n' "$pid"
+    printf 'agent_identity=%s\n' "$identity"
+    printf 'endpoint_pid=3\n'
+    printf 'endpoint_identity=%s\n' "$identity"
+    printf 'pgid=%s\n' "$pid"
+  } > "$record"
+  change_time=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the legacy scope change time"
+  boot_time=$((change_time + 3600))
+  boot_identity=$(fm_task_process_epoch_lstart $((boot_time + 1))) \
+    || fail "could not render the current boot identity"
+
+  rc=0
+  out=$(FM_TASK_PROCESS_BOOT_GENERATION=boot-now \
+    FM_TASK_PROCESS_BOOT_TIME="$boot_time" \
+    FM_TASK_PROCESS_BOOT_CLOCK_IDENTITY="$boot_identity" \
+    run_control "$dir" t1 interrupt) || rc=$?
+
+  expect_code 0 "$rc" "a stopped prior-boot scope should retire during interrupt"$'\n'"$out"
+  assert_contains "$out" "already-stopped t1 harness=claude backend=tmux process-scope=empty" \
+    "interrupt should report the recovered empty scope"
+  grep -qx 'status=empty' "$record" \
+    || fail "interrupt did not retire the proved prior-boot scope"
+  grep -qx "token=$token" "$record" \
+    || fail "interrupt lost the recovered scope token"
+  [ -z "$(keys_sent "$dir")" ] \
+    || fail "interrupt sent a key while recovering a stopped prior-boot scope"
+  pass "fm-control interrupt: a stopped prior-boot scope retires without signaling"
+}
+
 test_ambiguous_endpoint_refuses() {
   local dir out rc
   dir=$(new_case ambiguous)
@@ -1089,6 +1147,7 @@ test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
 test_missing_endpoint_refuses
 test_interrupt_refuses_when_no_agent_runs
+test_interrupt_retires_proved_prior_boot_scope_when_agent_stopped
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted

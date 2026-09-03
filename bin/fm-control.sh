@@ -25,7 +25,9 @@
 #              still exists, and the agent is still alive where the backend can
 #              classify that. Cancellation is confirmed only from an adapter-
 #              owned acknowledgement and otherwise reported unconfirmed. Busy
-#              state is never rewritten as proof of the action.
+#              state is never rewritten as proof of the action. If the agent is
+#              already gone, a scope proved to predate boot is retired without
+#              signaling and reported already stopped.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
@@ -459,6 +461,13 @@ task_process_scope_token() {
     scope_token=$(fm_task_process_scope_meta_token "$META") || return 1
   fi
   printf '%s' "$scope_token"
+}
+
+retire_prior_boot_task_process_scope() {
+  local scope_token
+  scope_token=$(task_process_scope_token) || return 1
+  [ -n "$scope_token" ] || return 2
+  fm_task_process_scope_retire_prior_boot "$STATE" "$ID" "$scope_token"
 }
 
 wait_scoped_agent_exit() {
@@ -962,7 +971,17 @@ case "$VERB" in
         # real, so it proceeds - the printed proof names exactly what was
         # verified rather than implying more.
         ;;
-      dead|missing) die "no agent is running at task $ID's recorded endpoint (state: $state); there is nothing to interrupt" ;;
+      dead|missing)
+        if retire_prior_boot_task_process_scope; then
+          retire_busy_incarnation
+          echo "already-stopped $ID harness=$HARNESS backend=$BACKEND process-scope=empty"
+          exit 0
+        else
+          retire_status=$?
+        fi
+        [ "$retire_status" -eq 2 ] || exit "$retire_status"
+        die "no agent is running at task $ID's recorded endpoint (state: $state); there is nothing to interrupt"
+        ;;
       *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint" ;;
     esac
     proof=$(do_interrupt)

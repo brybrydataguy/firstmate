@@ -369,11 +369,12 @@ write_active_reused_scope() {
 }
 
 write_generationless_scope_near_change_time() {
-  local dir=$1 id=$2 pid=$3 epoch identity meta token
+  local dir=$1 id=$2 pid=$3 epoch identity meta token token_epoch
   epoch=$(date +%s) || fail "could not read the current clock for a legacy scope"
+  token_epoch=${4:-$epoch}
   identity=$(scope_lstart_at "$epoch") \
     || fail "could not render the legacy scope anchor identity"
-  token="s$epoch.999.1"
+  token="s$token_epoch.999.1"
   meta="$dir/home/state/$id.meta"
   if ! awk -F= -v token="$token" '
     $1 == "spawn_gen" {print "spawn_gen=" token; next}
@@ -1671,6 +1672,28 @@ test_generationless_pre_boot_lstart_with_absent_anchor_relaunches() {
   pass "fm-spawn --relaunch: a corroborated generation-less pre-boot scope retires without signaling"
 }
 
+test_generationless_scope_with_delayed_publication_relaunches() {
+  local dir out rc pid record token_epoch change_time
+  dir=$(new_case generationless-delayed-publication rl90)
+  add_ship_task "$dir" rl90 claude
+  prepare_dead_relaunch "$dir" rl90
+  pid=$(absent_scope_pid)
+  token_epoch=$(($(date +%s) - 30)) \
+    || fail "could not derive the delayed legacy spawn epoch"
+  write_generationless_scope_near_change_time "$dir" rl90 "$pid" "$token_epoch"
+  record="$dir/home/state/rl90.process-scope"
+  change_time=$(fm_task_process_file_change_time "$record") \
+    || fail "could not read the delayed legacy scope change time"
+  [ "$token_epoch" -lt $((change_time - 5)) ] \
+    || fail "delayed publication fixture did not exceed the old correlation window"
+  set_legacy_boot_overlays "$record" 3600
+  out=$(run_spawn "$dir" rl90 --relaunch --harness claude); rc=$?
+  unset_boot_overlays
+  expect_code 0 "$rc" "a legitimately delayed generation-less publication should recover"$'\n'"$out"
+  assert_scope_empty "$record" rl90 "$LEGACY_SCOPE_TOKEN"
+  pass "fm-spawn --relaunch: delayed legacy publication preserves launch ordering proof"
+}
+
 test_generationless_scope_with_present_reused_anchor_refuses() {
   local dir out rc before record
   dir=$(new_case generationless-present-anchor rl85)
@@ -2297,6 +2320,7 @@ test_pre_reboot_relaunch_does_not_signal_a_reused_pid
 test_pre_reboot_spawn_relaunch_does_not_signal_a_reused_pid
 test_current_boot_identity_mismatch_still_refuses
 test_generationless_pre_boot_lstart_with_absent_anchor_relaunches
+test_generationless_scope_with_delayed_publication_relaunches
 test_generationless_scope_with_present_reused_anchor_refuses
 test_generationless_scope_with_ambiguous_boot_order_refuses
 test_generationless_scope_after_boot_refuses

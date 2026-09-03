@@ -23,12 +23,13 @@
 # generation, proving that none of its processes can still exist. A version 2
 # generation-less Darwin scope can use the same retirement only when its anchor
 # PID is absent and the active record's inode change time proves the record was
-# published before the current boot. Its spawn-token epoch and recorded anchor
-# `lstart=` must independently agree within five seconds with that change time,
-# the current boot's PID 1 `lstart=` must agree within one second with the
-# authoritative boot time, and the boot must be more than five seconds after
-# the record. Those paired epoch and civil-clock checks avoid reconstructing
-# capture-time timezone or wall-clock history from `lstart=` alone. Matching or
+# published before the current boot. Its spawn-token epoch must not postdate
+# the recorded anchor start or inode change time, the recorded anchor `lstart=`
+# must agree within five seconds with that change time, the current boot's PID 1
+# `lstart=` must agree within one second with the authoritative boot time, and
+# the boot must be more than five seconds after the record. Those paired epoch
+# and civil-clock checks avoid reconstructing capture-time timezone or wall-clock
+# history from `lstart=` alone. Matching or
 # unreadable boot-generation evidence, a present legacy anchor PID, an
 # uncorroborated or ambiguous timestamp, a missing PID by itself, an agent-free
 # endpoint, elapsed time, branch cleanliness, and process-name guesses never
@@ -334,7 +335,7 @@ fm_task_process_pid_absent() {
 
 fm_task_process_legacy_prior_boot_proven() {
   local scope_change_before scope_change_after current_boot_before current_boot_after
-  local boot_clock_before boot_clock_after token_epoch expected attempt
+  local boot_clock_before boot_clock_after token_epoch anchor_epoch expected attempt
   [ "${FM_TASK_PROCESS_SCOPE_VERSION-}" = 2 ] || return 1
   [ -z "${FM_TASK_PROCESS_SCOPE_BOOT_GENERATION-}" ] || return 1
   case "${FM_TASK_PROCESS_SCOPE_ANCHOR_IDENTITY-}" in lstart=*) ;; *) return 1 ;; esac
@@ -344,7 +345,6 @@ fm_task_process_legacy_prior_boot_proven() {
   [ "$scope_change_before" -lt $((current_boot_before - 5)) ] || return 1
   token_epoch=$(fm_task_process_spawn_token_epoch "$FM_TASK_PROCESS_SCOPE_TOKEN") || return 1
   [ "$token_epoch" -le "$scope_change_before" ] || return 1
-  [ "$token_epoch" -ge $((scope_change_before - 5)) ] || return 1
   boot_clock_before=$(fm_task_process_current_boot_clock_identity) || return 1
   expected=$(fm_task_process_epoch_lstart "$current_boot_before") || return 1
   if [ "$boot_clock_before" != "$expected" ]; then
@@ -358,6 +358,8 @@ fm_task_process_legacy_prior_boot_proven() {
     attempt=$((attempt + 1))
   done
   [ "$attempt" -le 5 ] || return 1
+  anchor_epoch=$((scope_change_before - attempt))
+  [ "$token_epoch" -le "$anchor_epoch" ] || return 1
   scope_change_after=$(fm_task_process_file_change_time "$FM_TASK_PROCESS_SCOPE_PATH") || return 1
   [ "$scope_change_after" = "$scope_change_before" ] || return 1
   boot_clock_after=$(fm_task_process_current_boot_clock_identity) || return 1
@@ -377,6 +379,23 @@ fm_task_process_scope_prior_boot_proven() {
     return $?
   fi
   fm_task_process_legacy_prior_boot_proven
+}
+
+fm_task_process_scope_retire_prior_boot() {
+  local state=$1 id=$2 expected_token=$3
+  fm_task_process_scope_token_valid "$expected_token" || {
+    echo "error: task $id has no valid launch generation for process-scope cleanup" >&2
+    return 1
+  }
+  fm_task_process_scope_record_read "$state" "$id" "$expected_token" || return 1
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 2
+  fm_task_process_scope_prior_boot_proven || return 2
+  fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN" \
+    "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" \
+    "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY" || {
+    echo "error: could not publish the empty process scope for task $id" >&2
+    return 1
+  }
 }
 
 fm_task_process_pgid() {
@@ -796,23 +815,15 @@ fm_task_process_scope_create_empty() {
 fm_task_process_scope_quiesce() {
   local state=$1 id=$2 expected_token=$3 label=${4:-task} snapshot current pid identity
   local pass=1 max_passes=${FM_TASK_PROCESS_SCOPE_REAP_PASSES:-3}
-  local own_pgid anchor_pgid excluded_pid=- exclude_descendants=0
+  local own_pgid anchor_pgid excluded_pid=- exclude_descendants=0 retire_status
   case "$max_passes" in ''|*[!0-9]*|0) max_passes=3 ;; esac
-  fm_task_process_scope_token_valid "$expected_token" || {
-    echo "error: task $id has no valid launch generation for process-scope cleanup" >&2
-    return 1
-  }
-  fm_task_process_scope_record_read "$state" "$id" "$expected_token" || return 1
-  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 0
-  if fm_task_process_scope_prior_boot_proven; then
-    fm_task_process_scope_mark_empty "$FM_TASK_PROCESS_SCOPE_PATH" "$FM_TASK_PROCESS_SCOPE_TOKEN" \
-      "$FM_TASK_PROCESS_SCOPE_CONTAINMENT" "$FM_TASK_PROCESS_SCOPE_ENDPOINT_PID" \
-      "$FM_TASK_PROCESS_SCOPE_ENDPOINT_IDENTITY" || {
-      echo "error: could not publish the empty process scope for task $id" >&2
-      return 1
-    }
+  if fm_task_process_scope_retire_prior_boot "$state" "$id" "$expected_token"; then
     return 0
+  else
+    retire_status=$?
   fi
+  [ "$retire_status" -eq 2 ] || return "$retire_status"
+  [ "$FM_TASK_PROCESS_SCOPE_STATUS" = active ] || return 0
   own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') || {
     echo "error: cannot inspect the lifecycle command's process group for task $id" >&2
     return 1
